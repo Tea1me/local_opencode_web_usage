@@ -1,17 +1,17 @@
 # OpenCode Web Usage
 
-给本地 `opencode web` 加一个与原生「审查 / 上下文」同栏的 **使用量** 标签。显示会话累计 Token、缓存复用、费用及 TPS/TPM/TTFT。
+给本地 `opencode web` 加一个与原生「审查 / 上下文」同栏的 **使用量** 标签。显示会话累计 Token、缓存复用、费用及 TPS/TPM/TTFT，并提供可手动开启的模型/工具执行诊断。
 
 | 方案 | 状态 | 适合 |
 | --- | --- | --- |
-| [油猴 v0.7.1](./opencode-web-usage.user.js) | **推荐日常使用**；JS 语法已通过；1.19.x 实时指标已由用户截图验证，新增折叠功能待浏览器实测 | 已安装的 OpenCode 1.19.x、兼容新版本 |
+| [油猴 v0.8.1](./opencode-web-usage.user.js) | **推荐日常使用**；JS 语法已通过；1.19.x 实时指标已由用户截图验证，新增折叠功能待浏览器实测 | 已安装的 OpenCode 1.19.x、兼容新版本 |
 | [原生 Panel 实验](./native-experiment/INTEGRATION.md) | 需要编译 OpenCode 源码；未编译实测 | 想把标签真正注册到 GUI 扩展系统 |
 
 ## 安装 / 更新
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/)。
 2. 打开 [**油猴脚本 Raw 地址**](https://raw.githubusercontent.com/Tea1me/local_opencode_web_usage/Tea1me/tea1me.github.io/opencode-web-usage.user.js)，在油猴中更新或重新安装。
-3. 确认用户脚本顶部为 **`@version 0.7.1`**，不要同时启用旧脚本。之后用 Ctrl + Shift + R 刷新。
+3. 确认用户脚本顶部为 **`@version 0.8.1`**，不要同时启用旧脚本。之后用 Ctrl + Shift + R 刷新。
 4. 正常运行 `opencode web`，进入已有会话、打开右侧原生面板，再点击「▥ 使用量」。
 
 本脚本针对 `http://127.0.0.1:4096/` 和 `http://localhost:4096/`；其他端口需自行改 `@match`。
@@ -34,25 +34,25 @@
 
 折叠按钮由 CSS 伪元素模拟，**并非上游真正的原生 Accordion**。OpenCode 将来的 DOM 结构变更可能需要更新匹配方式。对响应本身、Token/TPS 统计没有影响。
 
-## 助手消息数（v0.7.1 修复）
+## 模型事件与工具执行诊断（新增 v0.8.1）
 
-旧版面板一直显示「助手消息数 —（会话汇总）」是因为会话汇总返回了 Token/费用，但不包含助手消息条数。
+进入「使用量」→ **网络诊断**，点击 **开始捕获** 后向模型发送消息，或者执行 bash、shell、其他工具。面板会展示模型开始、完成、失败、重试、工具执行状态与耗时，并允许过滤异常、清空、复制脱敏 JSON。
 
-现在汇总数据仍独立刷新，助手消息数在后台单独读取：
+- **默认不捕获**；每次刷新需要重新手动开始，所有记录仅存在本页内存中，最多 200 条。
+- **严格不记录**完整请求 URL、命令行、工具 input/output、HTTP Header、Cookie、SSH 凭据、模型请求/响应正文。只记录固定事件名、工具名（白名单字符）、时长和错误类别（显式返回时包括 HTTP 状态码）。
+- 基于 OpenCode 1.x 的 `/global/event` + `message.part.updated` 等事件，消息轮询辅助补采工具完成情况；不拦截后端真实的网络流量。
+- **切换会话时停止捕获并清空**；本页刷新也清空。
+- 用户反馈「助手消息数」曾长期错误显示 0，因此在 v0.8.1 中**移除了这项不可靠的实验统计及其多页扫描请求**。
 
-- 优先通过 **OpenCode 1.19.2** 的 `/api/session/{id}/message?limit=200&order=desc` 读取完整消息列表；每页最多 200 条，沿 `cursor.next` 逐页累计 **`type === "assistant"`**，也兼容 `info.role === "assistant"` 格式。
-- 最多扫描 50 页（10,000 条消息）。若超过上限，显示「≥N（超过统计上限）」而不是不准确的总数。
-- 每 60 秒更新一次，手动刷新会重新统计；结果最多缓存 8 个会话，不影响每 10 秒的 Token 和性能刷新。
-- 当分页 API 不可用时尝试老的 `/session/{id}/message`，会标成「N（已读取）」表示旧接口的覆盖范围可能不完整；失败则显示「—（消息接口不可用）」。
-- 切换会话时停止对旧会话继续翻页，不把旧会话消息数写到新会话。
+想继续捕获工具内部真实的 HTTP/SSH 请求？请先阅读 **[网络诊断与 HTTP/SSH 采集可行性](./NETWORK_DIAGNOSTICS.md)**：需要显式的本地工具 wrapper、代理或系统级进程网络事件，单靠油猴无法获得准确的靶机流量。
 
-**消息数 ≠ 用户提问轮数**：一次用户提示可能对应多条 assistant 消息（模型继续、工具调用前后等），因此通常比用户消息数大。
+**版本验证状态：** 0.8.1 的 JS 语法、模拟模型/工具事件、去重、错误分类和敏感信息不落日志等测试已通过；**实际 OpenCode 1.19.2 浏览器运行仍待你本机验证**。若某类 SSE 事件缺失，时间线不会伪造这一事件。
 
 ## 为什么之前的 TPS/TTFT 是「—」？
 
 原脚本 v0.5.0 只订阅 2.x 的 `/api/event`、`session.step.*` 事件；**OpenCode 1.19.2 仍属于 1.x**，主要使用 `/global/event`、`/event` 和 `message.updated`、`message.part.updated`、`message.part.delta`。
 
-v0.7.0 沿用的采集顺序：
+v0.8.1 沿用的性能采集顺序：
 
 1. 优先尝试 `/global/event`（跨项目 1.x SSE）；连接失败尝试 `/event`（单项目 SSE），再尝试 `/api/event`（2.x SSE）。
 2. **并行备用方案**：面板展开时每 10 秒查询 `/session/{id}/message?limit=80` 的最近记录（失败再尝试带 `/api` 前缀），不依赖 SSE 一定稳定。
