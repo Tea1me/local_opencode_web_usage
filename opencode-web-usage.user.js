@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode Web 原生侧栏使用量
 // @namespace    https://github.com/Tea1me/local_opencode_web_usage
-// @version      0.10.0
-// @description  支持按需查看模型消息和工具调用的原始会话记录；保持默认脱敏、不保存原始内容
+// @version      0.11.0
+// @description  新增模型请求/工具调用关联视图：按轮次串联模型、工具、失败和后续回复
 // @author       Tea1me & ChatGPT
 // @match        http://127.0.0.1:4096/*
 // @match        http://localhost:4096/*
@@ -162,6 +162,17 @@
       .diag-tag { font-weight: 700; font-size: 12px; }
       .diag-record[data-kind="error"] .diag-tag { color: #cd493d; }
       .diag-record[data-kind="tool"] .diag-tag { color: var(--oc-accent); }
+      .diag-mode { display: flex; gap: 6px; padding-top: 10px; }
+      .diag-mode button { background: var(--oc-layer); border: 1px solid var(--oc-border); border-radius: 6px; padding: 6px 10px; }
+      .diag-mode button[aria-pressed="true"] { border-color: var(--oc-accent); color: var(--oc-accent); font-weight: 650; }
+      .diag-group { border: 1px solid var(--oc-border); border-radius: 9px; margin-bottom: 12px; overflow: hidden; }
+      .diag-group-head { background: var(--oc-layer); padding: 11px 12px; display: flex; flex-direction: column; gap: 6px; }
+      .diag-group-title { font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
+      .diag-group-meta { color: var(--oc-muted); font-size: 11px; }
+      .diag-group-body { padding: 10px 10px 3px 17px; border-left: 2px solid var(--oc-border); margin-left: 13px; }
+      .diag-group-body .diag-record { position: relative; margin-bottom: 8px; }
+      .diag-group-body .diag-record::before { content: ""; position: absolute; top: 16px; left: -19px; width: 11px; border-top: 2px solid var(--oc-border); }
+      .diag-group[data-has-error="true"] > .diag-group-head { border-left: 3px solid #cd493d; }
       .diag-time { margin-left: auto; color: var(--oc-muted); font-variant-numeric: tabular-nums; font-size: 11px; }
       .diag-detail { margin-top: 5px; color: var(--oc-muted); overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
       .diag-raw-action { margin-top: 9px; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--oc-border); background: var(--oc-bg); color: var(--oc-fg); font-size: 12px; }
@@ -331,7 +342,12 @@
             <button class="diag-btn diag-clear" type="button">清空</button>
             <button class="diag-btn diag-copy" type="button">复制脱敏日志</button>
           </div>
+          <div class="diag-mode" role="group" aria-label="诊断展示模式">
+            <button type="button" data-diag-mode="timeline" aria-pressed="true">时间线</button>
+            <button type="button" data-diag-mode="linked" aria-pressed="false">关联视图</button>
+          </div>
           <div class="diag-note diag-status" aria-live="polite">未开始捕获 · 等待手动开启</div>
+          <div class="diag-note diag-link-hint" hidden>按用户消息 parentID 关联同一轮的多个模型响应和工具调用；缺少关联 ID 的事件会单独归组。仅使用当前页面开始捕获后的事件，不推测不存在的步骤。</div>
           <div class="diag-records" role="log" aria-label="诊断事件列表"></div>
           <div class="foot">脱敏日志导出不包含原始模型/工具详情。按需查看只读取当前会话的本地历史记录，不会重放命令或向靶机发请求。模型消息历史不等于真实供应商 HTTP 请求报文；工具记录也不一定包含真实的 HTTP/SSH 流量。</div>
         </div>
@@ -363,6 +379,7 @@
     maxRows: 200,
     maxSeen: 800,
     rawLock: false,
+    messageParents: new Map(),
   };
   const diagPanel = node('.diag-content');
   const usagePanel = node('.stats-content');
@@ -371,6 +388,18 @@
   const diagCaptureButton = node('.diag-capture');
   const diagFilter = node('.diag-filter');
   const diagCopyButton = node('.diag-copy');
+  const diagLinkedHint = node('.diag-link-hint');
+  let diagnosticMode = 'timeline';
+  for (const button of shadow.querySelectorAll('[data-diag-mode]')) {
+    button.addEventListener('click', () => {
+      diagnosticMode = button.dataset.diagMode === 'linked' ? 'linked' : 'timeline';
+      for (const item of shadow.querySelectorAll('[data-diag-mode]'))
+        item.setAttribute('aria-pressed',String(item.dataset.diagMode===diagnosticMode));
+      diagLinkedHint.hidden = diagnosticMode !== 'linked';
+      diagnostic.rawLock = false;
+      renderDiagnostic(true);
+    });
+  }
   let activeView = 'usage';
 
   function setView(next) {
@@ -460,6 +489,12 @@
     const eventType = e.type;
     const message = d.info;
     if (eventType === 'message.updated' && message?.role === 'assistant') {
+      if (typeof message.id === 'string' && message.id.length<=256 &&
+          typeof message.parentID === 'string' && message.parentID.length<=256) {
+        diagnostic.messageParents.set(message.id,message.parentID);
+        if (diagnostic.messageParents.size > 500)
+          diagnostic.messageParents.delete(diagnostic.messageParents.keys().next().value);
+      }
       if (message?.error) {
         recordDiagnostic({at,category:'model',kind:'error',title:'模型响应失败',
           detail:errorCategory(message.error),key:'model-error:'+message.id,
@@ -738,6 +773,54 @@
     card.append(button,panel);
   }
 
+  function buildDiagnosticGroups(rows, parents) {
+    const result = new Map();
+    for (const row of rows) {
+      const id = row.reference?.messageID || null;
+      const parent = id && parents.get(id);
+      const key = parent ? 'turn:'+parent : id ? 'message:'+id : 'unlinked';
+      let group = result.get(key);
+      if (!group) {
+        group = {
+          key,
+          label: parent ? '对话轮次 · 用户消息 ' + parent.slice(-8) :
+            id ? '助手消息 · ' + id.slice(-8) : '未关联到消息的事件',
+          items: [], first: row.at, last:row.at, toolCalls:new Set(), errors:0,
+          messageIDs:new Set(),
+        };
+        result.set(key,group);
+      }
+      group.items.push(row);
+      group.first=Math.min(group.first,row.at);
+      group.last=Math.max(group.last,row.at);
+      if (id) group.messageIDs.add(id);
+      if (row.reference?.kind === 'tool' && row.reference.callID)
+        group.toolCalls.add(row.reference.callID);
+      if (row.kind==='error') group.errors++;
+    }
+    // A user turn may span multiple assistant messages; sort by start time
+    // within the correlated turn, then show newest turn first.
+    return [...result.values()].map(group=>{
+      group.items.sort((a,b)=>a.at-b.at);
+      return group;
+    }).sort((a,b)=>b.last-a.last);
+  }
+
+  function makeDiagnosticCard(row) {
+    const card=document.createElement('article');
+    card.className='diag-record';
+    card.dataset.kind=row.kind;
+    const head=document.createElement('div');
+    head.className='diag-head';
+    const title=document.createElement('span');title.className='diag-tag';title.textContent=row.title;
+    const timestamp=document.createElement('span');timestamp.className='diag-time';
+    timestamp.textContent=new Date(row.at).toLocaleTimeString('zh-CN');
+    const detail=document.createElement('div');detail.className='diag-detail';detail.textContent=row.detail;
+    head.append(title,timestamp);card.append(head,detail);
+    attachRawToolButton(card,row);
+    return card;
+  }
+
   function renderDiagnostic(force=false) {
     if (diagnostic.rawLock && !force) return;
     diagCaptureButton.textContent = diagnostic.enabled ? '停止捕获' : '开始捕获';
@@ -759,19 +842,35 @@
       empty.textContent=diagnostic.enabled?'尚未捕获符合条件的事件，请发起一次模型/工具请求。':'点击「开始捕获」后，新事件将显示在这里。';
       fragment.appendChild(empty);
     }
-    for (const row of [...rows].reverse()) {
-      const card=document.createElement('article');
-      card.className='diag-record';
-      card.dataset.kind=row.kind;
-      const head=document.createElement('div');
-      head.className='diag-head';
-      const title=document.createElement('span');title.className='diag-tag';title.textContent=row.title;
-      const timestamp=document.createElement('span');timestamp.className='diag-time';
-      timestamp.textContent=new Date(row.at).toLocaleTimeString('zh-CN');
-      const detail=document.createElement('div');detail.className='diag-detail';detail.textContent=row.detail;
-      head.append(title,timestamp);card.append(head,detail);
-      attachRawToolButton(card,row);
-      fragment.appendChild(card);
+    if (diagnosticMode === 'linked') {
+      const groups = buildDiagnosticGroups(rows,diagnostic.messageParents);
+      for (const group of groups) {
+        const container = document.createElement('section');
+        container.className='diag-group';
+        container.dataset.hasError=String(group.errors>0);
+        const head = document.createElement('div');
+        head.className='diag-group-head';
+        const title = document.createElement('div');
+        title.className='diag-group-title';
+        title.textContent=group.label;
+        const meta = document.createElement('div');
+        meta.className='diag-group-meta';
+        const duration = Math.max(0,group.last-group.first);
+        const range = new Date(group.first).toLocaleTimeString('zh-CN')+
+          ' → '+new Date(group.last).toLocaleTimeString('zh-CN');
+        meta.textContent=range+' · 记录跨度 '+(duration/1000).toFixed(1)+' s · '+
+          group.messageIDs.size+' 条助手消息 · '+group.toolCalls.size+
+          ' 次工具调用'+(group.errors?' · '+group.errors+' 条异常':'');
+        head.append(title,meta);
+        const body=document.createElement('div');body.className='diag-group-body';
+        for(const row of group.items)body.appendChild(makeDiagnosticCard(row));
+        container.append(head,body);
+        fragment.appendChild(container);
+      }
+    } else {
+      for (const row of [...rows].reverse()) {
+        fragment.appendChild(makeDiagnosticCard(row));
+      }
     }
     diagRecords.replaceChildren(fragment);
   }
@@ -788,11 +887,13 @@
     diagnostic.started=Date.now();
     diagnostic.rows=[];
     diagnostic.seen.clear();
+    diagnostic.messageParents.clear();
     renderDiagnostic();
   });
   node('.diag-clear').addEventListener('click',()=>{
     diagnostic.rows=[];
     diagnostic.seen.clear();
+    diagnostic.messageParents.clear();
     diagnostic.rawLock=false;
     renderDiagnostic(true);
   });
@@ -1423,6 +1524,7 @@
       if (diagnostic.enabled) stopDiagnostics();
       diagnostic.rows=[];
       diagnostic.seen.clear();
+      diagnostic.messageParents.clear();
       diagnostic.rawLock=false;
       if (activeView === 'diagnostics') renderDiagnostic(true);
       state.session = id;
