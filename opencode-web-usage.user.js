@@ -362,6 +362,7 @@
     seen: new Set(),
     maxRows: 200,
     maxSeen: 800,
+    rawLock: false,
   };
   const diagPanel = node('.diag-content');
   const usagePanel = node('.stats-content');
@@ -373,6 +374,7 @@
   let activeView = 'usage';
 
   function setView(next) {
+    if (next !== 'diagnostics') diagnostic.rawLock = false;
     activeView = next === 'diagnostics' ? 'diagnostics' : 'usage';
     diagPanel.hidden = activeView !== 'diagnostics';
     usagePanel.hidden = activeView !== 'usage';
@@ -381,7 +383,8 @@
       tab.setAttribute('aria-selected', String(selected));
       tab.tabIndex = selected ? 0 : -1;
     }
-    if (activeView === 'diagnostics') renderDiagnostic();
+    if (activeView === 'diagnostics') renderDiagnostic(true);
+    else renderDiagnostic(true);
   }
   for (const tab of shadow.querySelectorAll('.view-tab')) {
     tab.addEventListener('click', () => setView(tab.dataset.view));
@@ -612,9 +615,12 @@
     button.addEventListener('click',async()=>{
       if (!panel.hidden) {
         panel.hidden=true;pre.textContent='';
+        diagnostic.rawLock=false;
         button.textContent='按需查看原始详情';
+        renderDiagnostic(true);
         return;
       }
+      diagnostic.rawLock=true;
       const sessionID=state.session;
       const generation=state.generation;
       button.disabled=true;
@@ -637,7 +643,8 @@
     card.append(button,panel);
   }
 
-  function renderDiagnostic() {
+  function renderDiagnostic(force=false) {
+    if (diagnostic.rawLock && !force) return;
     diagCaptureButton.textContent = diagnostic.enabled ? '停止捕获' : '开始捕获';
     diagCaptureButton.setAttribute('aria-pressed',String(diagnostic.enabled));
     diagStatus.textContent =
@@ -676,7 +683,8 @@
   function stopDiagnostics() {
     diagnostic.enabled=false;
     diagnostic.sessionID=null;
-    renderDiagnostic();
+    diagnostic.rawLock=false;
+    renderDiagnostic(true);
   }
   diagCaptureButton.addEventListener('click',()=>{
     if(diagnostic.enabled){stopDiagnostics();return;}
@@ -690,9 +698,10 @@
   node('.diag-clear').addEventListener('click',()=>{
     diagnostic.rows=[];
     diagnostic.seen.clear();
-    renderDiagnostic();
+    diagnostic.rawLock=false;
+    renderDiagnostic(true);
   });
-  diagFilter.addEventListener('change',renderDiagnostic);
+  diagFilter.addEventListener('change',()=>{diagnostic.rawLock=false;renderDiagnostic(true);});
   diagCopyButton.addEventListener('click',async()=>{
     const rows=diagnostic.rows.map(row=>({
       time:new Date(row.at).toISOString(),
@@ -1319,7 +1328,8 @@
       if (diagnostic.enabled) stopDiagnostics();
       diagnostic.rows=[];
       diagnostic.seen.clear();
-      if (activeView === 'diagnostics') renderDiagnostic();
+      diagnostic.rawLock=false;
+      if (activeView === 'diagnostics') renderDiagnostic(true);
       state.session = id;
       state.generation++;
       resetView();
