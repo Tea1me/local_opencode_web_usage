@@ -1,5 +1,37 @@
 # 网络诊断：事件面板、工具运行与 HTTP/SSH 流量边界
 
+## v0.9.0：按需查看原始工具操作详情
+
+已在「使用量 → 网络诊断」增加**逐条「按需查看原始详情」**功能：
+
+1. 开始捕获，在时间线上找到某条工具 `运行中/完成/失败` 记录；
+2. 点击「按需查看原始详情」，脚本才通过当前 OpenCode 的本地消息 API 查询匹配的 `messageID / callID` 对应 ToolPart；
+3. 展开原始 `state.input`、`state.output`、`state.error`、工具名、起止时间和元数据；可选中文本复制；
+4. 点击「收起并清除原始详情」，原始数据从界面移除。**默认脱敏 JSON 导出仍不包含原始工具信息。**
+
+这一流程完全**不重放工具命令或 HTTP 请求**；仅读取本地已保存的消息。若消息被截断或压缩清理，原始输出可能已经不存在。为避免频繁网络请求及误泄露，原始内容不持久化、不自动读取，并且只在明确手动展开后显示，最大渲染 150,000 字符。
+
+**隐私提醒：** 你处理 CTF 时，工具参数可能包含 SSH 密码、Cookie、API Token、flag 及靶机地址。原始详情只应在你本机、可信环境下查看；不要未经审查就复制到第三方 AI、公开 Issue 或聊天中。此功能不应视为凭据清理工具。
+
+### 关于“发给 AI 的请求一定存在完整记录吗？”
+
+OpenCode 1.19.2 的 `MessageV2` 通过 `MessageTable` 和 `PartTable` 保存工具消息的 `input/output`。因此**工具级输入输出**通常能在会话历史找回。
+
+但真正发往大模型供应商的 HTTP payload 可能经过消息合并、上下文裁剪、工具输出截断、鉴权注入等处理，因此不能断言历史记录就是“实际网络层字节”的无损副本。Playwright 内部访问靶机网页的各个子资源、重定向、XHR/fetch 请求也不保证包含在 `browser_navigate` 的 ToolPart 中。
+
+### Playwright MCP 可以先不用独立抓包器
+
+如果你使用的是 [Microsoft Playwright MCP](https://github.com/microsoft/playwright-mcp)，官方已经提供：
+
+- `browser_network_requests`：列出当前页面加载后产生的网络请求、URL 和状态；
+- `browser_network_request`：读取指定请求的更详细 HTTP Header / Body（版本和工具配置支持时）。
+
+让 OpenCode **在 `browser_navigate` 后主动调用这两个工具**，网络报告本身会作为另一次 MCP 工具结果出现在 OpenCode 会话中。配合 v0.9.0 的按需原始 ToolPart 查看，就能看到浏览器请求的细节，而不必先自行安装系统级抓包。
+
+注意：这些工具仅监控 **Playwright MCP 所管理的浏览器**，不覆盖后端 Python、curl、SSH 或其他独立进程；完整 Headers/Body 可能高度敏感，谨慎分享。
+
+---
+
 ## 已实现：v0.8.1 事件诊断
 
 Tampermonkey 脚本在 OpenCode 的原生「使用量」同栏内增加 **网络诊断** 子页。
