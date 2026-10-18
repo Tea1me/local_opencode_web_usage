@@ -268,9 +268,9 @@
     ]) {
       if (!element) continue;
       const color = getComputedStyle(element).backgroundColor;
-      const match = color.match(/rgba?\\(([^)]+)\\)/);
+      const match = color.match(/rgba?\(([^)]+)\)/);
       if (!match) continue;
-      const rgba = match[1].split(/[\\s,\\/]+/).map(Number);
+      const rgba = match[1].split(/[\s,\/]+/).map(Number);
       if (rgba.length >= 4 && rgba[3] < 0.1) continue;
       const [red, green, blue] = rgba;
       if (![red, green, blue].every(Number.isFinite)) continue;
