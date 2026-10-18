@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode Web 原生侧栏使用量
 // @namespace    https://github.com/Tea1me/local_opencode_web_usage
-// @version      0.6.0
+// @version      0.6.1
 // @description  修复 OpenCode 1.19.x 性能采集，补充 SSE 与消息轮询回退
 // @author       Tea1me & ChatGPT
 // @match        http://127.0.0.1:4096/*
@@ -258,7 +258,7 @@
           </div>
           <div class="subhead">性能监测 · 1.x/2.x 兼容</div>
           <div class="perf-grid">
-            <div class="perf-tile"><small>最近 TPS</small><strong data-perf="tps">—</strong></div>
+            <div class="perf-tile"><small title="输出 Token / 流式输出耗时；V1 会包含部分结算开销，属于近似值">最近 TPS（近似）</small><strong data-perf="tps">—</strong></div>
             <div class="perf-tile"><small>60 秒 TPM</small><strong data-perf="tpm">—</strong></div>
             <div class="perf-tile"><small>最近 TTFT</small><strong data-perf="ttft">—</strong></div>
           </div>
@@ -619,8 +619,8 @@
     } else if (e.type === 'message.part.updated') {
       const p = d.part;
       if ((p?.type === 'text' || p?.type === 'reasoning') &&
-          typeof p.text === 'string' && p.text.trim())
-        markFirst(p.messageID, epoch(p.time?.start) ?? time);
+          typeof p.text === 'string' && p.text.trim() && epoch(p.time?.start))
+        markFirst(p.messageID, epoch(p.time.start));
     } else if (e.type === 'message.part.delta') {
       if (typeof d.delta === 'string' && d.delta.trim() &&
         (d.field === 'text' || d.field === undefined))
@@ -652,7 +652,12 @@
   }
 
   function connectPerformance() {
-    if (eventSource || !('EventSource' in window)) return;
+    if (eventSource) return;
+    if (!('EventSource' in window)) {
+      perf.sseStatus = '浏览器不支持 EventSource，使用消息轮询';
+      renderPerformance();
+      return;
+    }
     if (candidateIndex >= eventPaths.length) {
       perf.sseStatus = '接口均不可用，稍后重试';
       renderPerformance();
@@ -666,7 +671,19 @@
     const url = eventPaths[candidateIndex];
     perf.sseStatus = '探测 ' + url;
     renderPerformance();
-    const source = new EventSource(url, { withCredentials: true });
+    let source;
+    try {
+      source = new EventSource(url, { withCredentials: true });
+    } catch (error) {
+      perf.sseStatus = '无法连接 ' + url + '，尝试回退';
+      candidateIndex++;
+      renderPerformance();
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        connectPerformance();
+      }, 1000);
+      return;
+    }
     eventSource = source;
     let opened = false;
     let moved = false;
