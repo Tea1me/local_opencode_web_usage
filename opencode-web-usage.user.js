@@ -380,7 +380,11 @@
   }
   function scanNewThinking(node) {
     if (!(node instanceof Element)) return;
-    if (node.matches(REASON_SELECTOR)) restoreThinkingPart(node);
+    const rootIsReasoning = node.matches(REASON_SELECTOR);
+    // Streamed markdown frequently adds descendant nodes. Those are never
+    // new reasoning parts; skip subtree scans on every token delta.
+    if (!rootIsReasoning && node.closest(REASON_SELECTOR)) return;
+    if (rootIsReasoning) restoreThinkingPart(node);
     for (const part of node.querySelectorAll(REASON_SELECTOR)) restoreThinkingPart(part);
   }
   const thinkingObserver = new MutationObserver((records) => {
