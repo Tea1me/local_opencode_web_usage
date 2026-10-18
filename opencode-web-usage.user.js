@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode Web 原生侧栏使用量
 // @namespace    https://github.com/Tea1me/local_opencode_web_usage
-// @version      0.3.0
-// @description  修复布局及浅色主题，安全嵌入右侧可折叠会话用量面板
+// @version      0.4.0
+// @description  将使用量嵌入到原生审查/上下文同一侧栏的标签页（无需额外右侧列）
 // @author       Tea1me & ChatGPT
 // @match        http://127.0.0.1:4096/*
 // @match        http://localhost:4096/*
@@ -20,7 +20,7 @@
   const CONFIG = {
     refreshMs: 10000,
     routeCheckMs: 1200,
-    openKey: 'oc-web-usage:dock-open:v1',
+    openKey: 'oc-web-usage:native-tab-open:v2',
     widthKey: 'oc-web-usage:dock-width:v1',
   };
   const number = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
@@ -39,7 +39,7 @@
     try { return decodeURIComponent(match[1]); } catch { return match[1]; }
   };
   const state = {
-    open: readStore(CONFIG.openKey, 'true') === 'true',
+    open: readStore(CONFIG.openKey, 'false') === 'true',
     width: clamp(number(readStore(CONFIG.widthKey, '330')) || 330, 275, 480),
     session: null,
     pending: false,
@@ -57,29 +57,23 @@
   host.hidden = true;
   const shadow = host.attachShadow({ mode: 'open' });
   shadow.innerHTML = `
+
     <style>
       :host {
-        /* Explicit palettes avoid the white-on-white issue when the host lives
-           outside OpenCode's own theme-token scope. */
         --oc-bg: #ffffff;
         --oc-layer: #f3f5f9;
         --oc-fg: #202938;
         --oc-muted: #596579;
         --oc-border: #d5dbe5;
+        --oc-accent: #387ad4;
         display: block;
         position: fixed;
-        top: 44px;
-        right: 8px;
-        bottom: 8px;
-        z-index: 2147483000;
-        width: var(--oc-usage-width);
-        height: auto;
-        min-width: 0;
-        box-sizing: border-box;
+        inset: 0;
+        z-index: 80;
         color: var(--oc-fg);
         font-family: inherit;
         font-size: 13px;
-        transition: width 180ms ease;
+        pointer-events: none;
       }
       :host([data-theme="dark"]) {
         --oc-bg: #151d2b;
@@ -87,72 +81,122 @@
         --oc-fg: #f1f5f9;
         --oc-muted: #a0adbf;
         --oc-border: #3c4a5c;
+        --oc-accent: #80adff;
       }
       :host([hidden]) { display: none !important; }
-      :host([data-open="false"]) { width: 42px; }
       *, *::before, *::after { box-sizing: border-box; }
       button { color: inherit; font: inherit; cursor: pointer; }
-      button:focus-visible { outline: 2px solid var(--v2-icon-icon-accent, #66a5ff); outline-offset: 2px; }
-      .dock { display: flex; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden;
-        border-radius: 10px; background: var(--oc-bg); box-shadow: 0 2px 12px #0002;
-        border: 1px solid var(--oc-border); }
-      .body { display: flex; flex-direction: column; width: 100%; min-width: 0; overflow: hidden; }
-      .bar { min-height: 48px; display: flex; align-items: center; gap: 7px; padding: 0 13px;
-        border-bottom: 1px solid var(--oc-border); }
-      .bar strong { font-size: 14px; letter-spacing: .1px; white-space: nowrap; flex: 1; }
-      .icon { width: 27px; height: 27px; padding: 3px; display: grid; place-items: center;
-        border: 0; border-radius: 7px; background: transparent; }
-      .icon:hover, .closed:hover { background: var(--oc-layer); }
-      .icon svg { width: 17px; height: 17px; stroke: currentColor; fill: none;
-        stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-      .content { min-height: 0; overflow-y: auto; padding: 14px 13px 16px; scrollbar-width: thin; }
+      button:focus-visible { outline: 2px solid var(--oc-accent); outline-offset: 2px; }
+      .native-tab {
+        position: fixed;
+        top: var(--oc-tab-top, 48px);
+        left: var(--oc-tab-left, -300px);
+        width: 88px;
+        height: 33px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 5px;
+        padding: 0 5px;
+        border: 0;
+        border-bottom: 2px solid transparent;
+        border-radius: 5px 5px 0 0;
+        color: var(--oc-muted);
+        background: transparent;
+        pointer-events: auto;
+        white-space: nowrap;
+        font-size: 12px;
+      }
+      .native-tab:hover { background: var(--oc-layer); color: var(--oc-fg); }
+      :host([data-open="true"]) .native-tab {
+        background: var(--oc-layer);
+        border-bottom-color: var(--oc-accent);
+        color: var(--oc-fg);
+        font-weight: 600;
+      }
+      .dock {
+        display: none;
+        position: fixed;
+        top: var(--oc-panel-top, 100px);
+        left: var(--oc-panel-left, -1000px);
+        width: var(--oc-panel-width, 0px);
+        height: var(--oc-panel-height, 0px);
+        overflow: hidden;
+        border: 1px solid var(--oc-border);
+        border-top: 0;
+        border-radius: 0 0 9px 9px;
+        background: var(--oc-bg);
+        pointer-events: auto;
+        box-shadow: 0 5px 16px #0002;
+      }
+      :host([data-open="true"]) .dock { display: flex; }
+      .body { display: flex; flex-direction: column; width: 100%; min-width: 0; min-height: 0; overflow: hidden; }
+      .bar {
+        min-height: 45px; flex-shrink: 0; display: flex; align-items: center;
+        gap: 7px; padding: 0 15px; border-bottom: 1px solid var(--oc-border);
+      }
+      .bar strong { font-size: 13px; white-space: nowrap; flex: 1; }
+      .icon {
+        width: 28px; height: 28px; padding: 4px; display: grid; place-items: center;
+        border: 0; border-radius: 7px; background: transparent;
+      }
+      .icon:hover { background: var(--oc-layer); }
+      .icon svg {
+        width: 17px; height: 17px; stroke: currentColor; fill: none;
+        stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+      }
+      .content {
+        min-height: 0; flex: 1; overflow-y: auto;
+        padding: 14px 16px 20px; scrollbar-width: thin;
+      }
       .status { color: var(--oc-muted); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
-      .summary { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0 16px; }
-      .tile { min-width: 0; padding: 11px; border-radius: 9px;
-        background: var(--oc-layer); border: 1px solid var(--oc-border); }
-      .tile small { display: block; color: var(--oc-muted); margin-bottom: 5px; }
-      .tile strong { display: block; font-variant-numeric: tabular-nums;
-        font-size: 17px; color: var(--oc-fg); letter-spacing: -.4px; overflow-wrap: anywhere; }
-      .subhead { font-size: 11px; letter-spacing: .2px; color: var(--oc-muted);
-        margin: 14px 0 8px; font-weight: 600; }
-      .rows { display: grid; grid-template-columns: minmax(0,1fr) auto;
-        gap: 11px 9px; align-items: start; }
+      .summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin: 12px 0 18px; }
+      .tile {
+        min-width: 0; padding: 13px 11px; border-radius: 9px;
+        background: var(--oc-layer); border: 1px solid var(--oc-border);
+      }
+      .tile small { display: block; color: var(--oc-muted); margin-bottom: 6px; }
+      .tile strong {
+        display: block; font-variant-numeric: tabular-nums; font-size: 17px;
+        color: var(--oc-fg); letter-spacing: -.4px; overflow-wrap: anywhere;
+      }
+      .subhead {
+        font-size: 11px; letter-spacing: .2px; color: var(--oc-muted);
+        margin: 17px 0 10px; font-weight: 600;
+      }
+      .rows {
+        display: grid; grid-template-columns: minmax(0, 1fr) auto;
+        gap: 13px 10px; align-items: start;
+      }
       .label { color: var(--oc-muted); }
-      .value { font-variant-numeric: tabular-nums; font-weight: 600; max-width: 170px;
-        text-align: end; overflow-wrap: anywhere; }
-      .track { height: 6px; background: var(--oc-layer); border-radius: 99px; overflow: hidden;
-        display: flex; margin-top: 12px; }
+      .value {
+        color: var(--oc-fg); font-variant-numeric: tabular-nums;
+        font-weight: 600; max-width: min(200px, 45vw);
+        text-align: end; overflow-wrap: anywhere;
+      }
+      .track {
+        height: 6px; background: var(--oc-layer); border-radius: 99px;
+        overflow: hidden; display: flex; margin-top: 15px;
+      }
       .seg { min-width: 0; transition: width 180ms ease; height: 100%; }
       .input { background: #54a4ff; } .output { background: #65c9ae; }
-      .reasoning { background: #ceabff; } .cache { background: #f0ba63; } .write { background: #ef8ba5; }
-      .legend { display: flex; flex-wrap: wrap; gap: 6px 10px; color: var(--oc-muted);
-        font-size: 10px; margin-top: 9px; }
-      .dot { display: inline-block; height: 7px; width: 7px; border-radius: 2px;
-        margin-right: 4px; vertical-align: middle; }
-      .foot { margin-top: 18px; padding-top: 10px; border-top: 1px solid var(--oc-border);
-        color: var(--oc-muted); font-size: 11px; line-height: 1.5; }
-      .closed { display: none; padding: 0; width: 100%; height: 100%; min-width: 0;
-        border: 0; background: var(--oc-bg); color: var(--oc-fg);
-        align-items: center; flex-direction: column; gap: 8px; padding-top: 15px; }
-      .closed .glyph { font-size: 18px; }
-      .closed .vertical { writing-mode: vertical-rl; letter-spacing: 3px; font-size: 12px; }
-      :host([data-open="false"]) .body { display: none; }
-      :host([data-open="false"]) .closed { display: flex; }
-      .grip { position: absolute; top: 12%; left: -4px; bottom: 12%; width: 8px;
-        cursor: ew-resize; touch-action: none; z-index: 3; }
-      :host([data-open="false"]) .grip { display: none; }
-      .grip:hover::after { content: ""; position: absolute; left: 3px; top: 0;
-        bottom: 0; width: 2px; background: var(--v2-icon-icon-accent, #66a5ff); }
-      @media (max-width: 960px) {
-        :host([data-open="true"]) { width: min(var(--oc-usage-width), calc(100vw - 16px)); }
-        :host([data-open="true"]) .dock { box-shadow: 0 10px 35px #0006; }
-        .grip { display: none; }
+      .reasoning { background: #ceabff; } .cache { background: #f0ba63; }
+      .write { background: #ef8ba5; }
+      .legend {
+        display: flex; flex-wrap: wrap; gap: 6px 10px;
+        color: var(--oc-muted); font-size: 10px; margin-top: 9px;
       }
+      .dot { display: inline-block; height: 7px; width: 7px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+      .foot {
+        margin-top: 18px; padding-top: 10px; border-top: 1px solid var(--oc-border);
+        color: var(--oc-muted); font-size: 11px; line-height: 1.5;
+      }
+      .closed { display: none; }
       @media (prefers-reduced-motion: reduce) {
-        :host, .seg { transition: none; }
+        .seg { transition: none; }
       }
     </style>
-    <div class="grip" title="拖动调整宽度" aria-hidden="true"></div>
+    <button type="button" class="native-tab" aria-label="切换使用量面板" aria-pressed="false" title="查看会话使用量">▥ 使用量</button>
     <div class="dock">
       <button type="button" class="closed" aria-label="展开使用量侧栏" title="展开使用量">
         <span class="glyph">▥</span><span class="vertical">使用量</span>
@@ -217,40 +261,84 @@
     .map((element) => [element.dataset.seg, element]));
   const refreshBtn = node('.refresh');
 
-  function setOpen(open) {
-    state.open = open;
-    host.dataset.open = String(open);
-    writeStore(CONFIG.openKey, open);
-    syncLayout();
-    if (open && state.session) void refresh(true);
-  }
-  node('.closed').addEventListener('click', () => setOpen(true));
-  node('.collapse').addEventListener('click', () => setOpen(false));
-  refreshBtn.addEventListener('click', () => void refresh(true));
 
-  // Reserve room through a stylesheet; do not move/append nodes among Solid children.
-  // The panel itself is fixed to the right edge, below the app's titlebar.
-  const reserveStyle = document.createElement('style');
-  reserveStyle.id = 'oc-usage-dock-reservation';
-  reserveStyle.textContent = `
-    @media (min-width: 961px) {
-      html[data-oc-usage-docked="true"] main.contain-content {
-        margin-inline-end: var(--oc-usage-reserve, 0px) !important;
-      }
-    }
-  `;
-  document.head.appendChild(reserveStyle);
+  const nativeTab = node('.native-tab');
+  let observedPanel = null;
+
+  function setOpen(open) {
+    state.open = Boolean(open);
+    host.dataset.open = String(state.open);
+    nativeTab.setAttribute('aria-pressed', String(state.open));
+    writeStore(CONFIG.openKey, state.open);
+    syncPlacement();
+    if (state.open && state.session) void refresh(true);
+  }
+
+  nativeTab.addEventListener('click', () => setOpen(!state.open));
+  node('.collapse').addEventListener('click', () => setOpen(false));
+  node('.refresh').addEventListener('click', () => void refresh(true));
+
+  // Native side panels belong to the Solid extension host. Portals are anchored
+  // by geometry only: we do not insert nodes into its tab list or content tree.
+  // This avoids the blank-screen regression of v0.2.0.
   document.body.appendChild(host);
 
-  function syncLayout() {
-    const main = [...document.querySelectorAll('main')]
-      .find((el) => el.classList.contains('contain-content') &&
-        el.parentElement?.classList.contains('flex-row'));
-    const reserve = state.open ? state.width + 16 : 58;
-    // Only reserve space when the known shell layout is present.
-    const docked = Boolean(state.session && main);
-    document.documentElement.dataset.ocUsageDocked = String(docked);
-    document.documentElement.style.setProperty('--oc-usage-reserve', reserve + 'px');
+  function onNativeTabInput(event) {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest('[role="tab"]') ||
+        target.closest('[data-slot="session-side-panel-actions"]') ||
+        target.closest('[data-slot="tabs-trigger-close-button"]')) {
+      if (state.open) setOpen(false);
+    }
+  }
+
+  function syncPlacement() {
+    const panel = document.getElementById('review-panel');
+    const bar = panel?.querySelector('.session-review-v2-tabs-bar');
+    const tablist = bar?.querySelector('[role="tablist"]');
+    const rect = panel?.getBoundingClientRect();
+    const barRect = bar?.getBoundingClientRect();
+
+    // Do not show a duplicate external dock; only attach to the actual context side panel.
+    const visible = Boolean(
+      state.session && panel && tablist && barRect && rect &&
+      rect.width > 190 && rect.height > 140 &&
+      panel.getAttribute('aria-hidden') !== 'true' &&
+      !panel.hasAttribute('inert')
+    );
+    host.hidden = !visible;
+
+    if (panel !== observedPanel) {
+      observedPanel?.removeEventListener('pointerdown', onNativeTabInput, true);
+      observedPanel = panel;
+      observedPanel?.addEventListener('pointerdown', onNativeTabInput, true);
+    }
+    if (!visible) return;
+
+    const nativeControls = [...tablist.querySelectorAll('button, [role="tab"]')];
+    const rightmost = nativeControls.reduce((right, element) => {
+      const box = element.getBoundingClientRect();
+      return box.width && box.height ? Math.max(right, box.right) : right;
+    }, tablist.getBoundingClientRect().left);
+
+    // Align after Context and the native "+" button. If space is tight, stay
+    // in the right end of the same header rather than moving OpenCode's nodes.
+    const width = 88;
+    const x = Math.max(
+      barRect.left + 10,
+      Math.min(rightmost + 8, barRect.right - width - 8)
+    );
+    const tabY = Math.max(barRect.top, barRect.top + (barRect.height - 33) / 2);
+    const contentTop = Math.max(barRect.bottom, rect.top + 36);
+    const contentHeight = Math.max(0, rect.bottom - contentTop - 1);
+
+    host.style.setProperty('--oc-tab-left', x.toFixed(1) + 'px');
+    host.style.setProperty('--oc-tab-top', tabY.toFixed(1) + 'px');
+    host.style.setProperty('--oc-panel-left', (rect.left + 1).toFixed(1) + 'px');
+    host.style.setProperty('--oc-panel-top', contentTop.toFixed(1) + 'px');
+    host.style.setProperty('--oc-panel-width', Math.max(0, rect.width - 2).toFixed(1) + 'px');
+    host.style.setProperty('--oc-panel-height', contentHeight.toFixed(1) + 'px');
   }
 
   function detectTheme() {
@@ -260,7 +348,6 @@
         element?.getAttribute('data-theme') || '').toLowerCase();
       if (value === 'dark' || value === 'light') return value;
     }
-    // Prefer a visible surface over the OS setting: app and system themes may differ.
     for (const element of [
       document.querySelector('[data-slot="session-chat-panel"]'),
       document.querySelector('main.contain-content'),
@@ -278,29 +365,6 @@
     }
     return matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   }
-
-  const grip = node('.grip');
-  let dragging = false;
-  grip.addEventListener('pointerdown', (event) => {
-    if (event.button !== 0) return;
-    dragging = true;
-    grip.setPointerCapture(event.pointerId);
-    event.preventDefault();
-  });
-  grip.addEventListener('pointermove', (event) => {
-    if (!dragging) return;
-    state.width = clamp(window.innerWidth - event.clientX - 8, 275, 480);
-    host.style.setProperty('--oc-usage-width', state.width + 'px');
-    syncLayout();
-  });
-  const endResize = () => {
-    if (!dragging) return;
-    dragging = false;
-    writeStore(CONFIG.widthKey, state.width);
-  };
-  grip.addEventListener('pointerup', endResize);
-  grip.addEventListener('pointercancel', endResize);
-  window.addEventListener('blur', endResize);
 
   async function jsonGET(path) {
     const response = await fetch(path, {
@@ -417,26 +481,22 @@
   }
 
   function syncRoute() {
-    if (!host.isConnected && document.body) document.body.appendChild(host);
     const id = currentSession();
-    host.hidden = !id;
     host.dataset.theme = detectTheme();
-    if (id === state.session) {
-      syncLayout();
-      return;
+    if (id !== state.session) {
+      state.session = id;
+      state.generation++;
+      resetView();
+      status.textContent = id ? '即将读取 ' + id : '请打开会话';
+      if (id && state.open) void refresh(true);
     }
-    state.session = id;
-    state.generation++;
-    resetView();
-    status.textContent = id ? '即将读取 ' + id : '请打开会话';
-    syncLayout();
-    if (id && state.open) void refresh(true);
+    syncPlacement();
   }
 
   syncRoute();
   setInterval(syncRoute, CONFIG.routeCheckMs);
   setInterval(() => void refresh(), CONFIG.refreshMs);
-  window.addEventListener('resize', syncLayout);
+  window.addEventListener('resize', syncPlacement);
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) { syncRoute(); void refresh(); }
   });
