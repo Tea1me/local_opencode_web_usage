@@ -656,16 +656,20 @@
             (reference.partID && part.id === reference.partID)) {
           // Explicit allowlist: only fields that belong to this tool part.
           return {
-            tool: part.tool ?? null,
+            tool: part.tool ?? part.name ?? null,
             callID:part.callID ?? null,
             status: part.state?.status ?? null,
-            start:part.state?.time?.start ?? null,
-            end:part.state?.time?.end ?? null,
+            start:part.state?.time?.start ?? part.time?.ran ?? part.time?.created ?? null,
+            end:part.state?.time?.end ?? part.time?.completed ?? null,
             input:part.state?.input ?? null,
-            output:part.state?.output ?? null,
+            output:part.state?.output ?? part.state?.content ?? null,
             error:part.state?.error ?? null,
             title:part.state?.title ?? null,
             metadata:part.state?.metadata ?? null,
+            structured:part.state?.structured ?? null,
+            result:part.state?.result ?? null,
+            attachments:part.state?.attachments ?? null,
+            provider:part.provider ?? null,
             // The host may compact/truncate tool output before the next LLM call.
             compacted:part.state?.time?.compacted ?? null,
           };
@@ -1029,6 +1033,7 @@
     abort: null, token: 0, rows: [], parents: new Map(),
     page: 0, count: 0, pages: 0, truncated: false, legacy: false,
     status: '尚未加载 · 点击「加载完整会话」',
+    lastUserID:null,
   };
   const histLoadBtn = node('.hist-load');
   const histCancelBtn = node('.hist-cancel');
@@ -1054,13 +1059,16 @@
     const out=[{at:created,category:'model',kind:'model',title:'模型消息创建（历史）',
       detail:'本地已存储的助手消息',reference:ref}];
     const parts=Array.isArray(item?.parts) ? item.parts :
-      Array.isArray(info?.parts) ? info.parts : [];
+      Array.isArray(info?.parts) ? info.parts :
+      Array.isArray(item?.content) ? item.content :
+      Array.isArray(info?.content) ? info.content : [];
     for (const p of parts) {
-      if (p?.type==='tool' && typeof p.callID==='string') {
-        const tool=toolName(p.tool);
-        const start=historyTime(p.state?.time?.start,created);
-        const end=historyTime(p.state?.time?.end,null);
-        const tRef={kind:'tool',messageID:mid,callID:p.callID,
+      if (p?.type==='tool' && (typeof p.callID==='string'||typeof p.id==='string')) {
+        const tool=toolName(p.tool??p.name);
+        const start=historyTime(p.state?.time?.start,
+          historyTime(p.time?.ran,historyTime(p.time?.created,created)));
+        const end=historyTime(p.state?.time?.end,historyTime(p.time?.completed,null));
+        const tRef={kind:'tool',messageID:mid,callID:p.callID??p.id,
           partID:typeof p.id==='string'?p.id:null};
         out.push({at:start,category:'tool',kind:'tool',title:tool+' · 执行中（历史）',
           detail:'历史工具调用',reference:tRef});
@@ -1074,7 +1082,7 @@
         }
       } else if ((p?.type==='text'||p?.type==='reasoning') &&
                  typeof p.text==='string' && p.text.length>0) {
-        out.push({at:historyTime(p.time?.start,created),category:'model',kind:'model',
+        out.push({at:historyTime(p.time?.start,historyTime(p.time?.created,created)),category:'model',kind:'model',
           title:p.type==='reasoning'?'推理内容（历史）':'模型文本输出（历史）',
           detail:'内容按需展开，不在历史摘要中保存',reference:ref});
       }
@@ -1105,6 +1113,7 @@
     historyState.pages=0;
     historyState.truncated=false;
     historyState.legacy=false;
+    historyState.lastUserID=null;
     historyState.status='尚未加载 · 点击「加载完整会话」';
     if (diagnosticMode==='history') renderHistory();
   }
@@ -1163,8 +1172,15 @@
             typeof data.cursor!=='object') throw Error('游标分页响应格式不兼容');
         historyState.count+=data.data.length;
         historyState.pages++;
-        for (const item of data.data)
+        for (const item of data.data) {
+          const info=item?.info??item;
+          if ((info?.type==='user'||info?.role==='user') && typeof info.id==='string')
+            historyState.lastUserID=info.id;
+          if ((info?.type==='assistant'||info?.role==='assistant') &&
+              typeof info.id==='string' && !info.parentID && historyState.lastUserID)
+            historyState.parents.set(info.id,historyState.lastUserID);
           historyState.rows.push(...historyRowsFromMessage(item,historyState.parents));
+        }
         const next=data.cursor.next;
         lastPageHadCursor=Boolean(next);
         historyState.status='已读取 '+historyState.count+' 条消息 / '+historyState.pages+' 页…';
