@@ -958,6 +958,38 @@
       detail:row.detail
     });
     const rows=diagnostic.rows.map(sanitized);
+    if(diagnosticMode==='browser') {
+      const records=browserState.rows.map(r=>({
+        time:new Date(r.at).toISOString(),source:r.via,method:r.method,
+        path:r.path,status:r.status,durationMs:r.duration,
+      }));
+      try{
+        await navigator.clipboard.writeText(JSON.stringify({
+          schema:'opencode-browser-api-v1',
+          note:'浏览器到本地 OpenCode API；仅方法、脱敏路径、状态、耗时，不含 URL 查询参数/正文/认证头',
+          requests:records,
+        },null,2));
+        diagCopyButton.textContent='已复制';
+      }catch{diagCopyButton.textContent='复制失败';}
+      setTimeout(()=>{diagCopyButton.textContent='复制脱敏日志';},2200);
+      return;
+    }
+    if(diagnosticMode==='history') {
+      const records=historyState.rows.slice(-500).map(sanitized);
+      try{
+        await navigator.clipboard.writeText(JSON.stringify({
+          schema:'opencode-history-summary-v1',
+          note:'仅最近 500 条已恢复的事件摘要；不含原始消息、工具参数、系统提示或认证头',
+          scannedMessages:historyState.count,scannedPages:historyState.pages,
+          limitedToLatestEvents:historyState.rows.length>500,
+          incomplete:historyState.truncated||historyState.legacy||!historyState.loaded,
+          events:records,
+        },null,2));
+        diagCopyButton.textContent='已复制';
+      }catch{diagCopyButton.textContent='复制失败';}
+      setTimeout(()=>{diagCopyButton.textContent='复制脱敏日志';},2200);
+      return;
+    }
     const linked=diagnosticMode === 'linked'
       ? buildDiagnosticGroups(diagnostic.rows,diagnostic.messageParents)
         .map((group,index)=>({
@@ -1015,7 +1047,8 @@
     if (!info || (info.role!=='assistant' && info.type!=='assistant') || typeof info.id!=='string') return [];
     const mid=info.id;
     if (typeof info.parentID==='string') parents.set(mid,info.parentID);
-    const created=historyTime(info.time?.created,Date.now());
+    const created=historyTime(info.time?.created,null);
+    if(created===null)return [];
     const completed=historyTime(info.time?.completed,null);
     const ref={kind:'model',messageID:mid};
     const out=[{at:created,category:'model',kind:'model',title:'模型消息创建（历史）',
@@ -1223,7 +1256,7 @@
   const browserState = {
     enabled:false, sessionID:null, generation:0, bodyEnabled:false,
     rows:[], maxRows:120, counter:0, rawLock:false,
-    fetchHook:null, xhrOpenHook:null, xhrSendHook:null, xhrMeta:new WeakMap(),
+    fetchHook:null, fetchOriginal:null, xhrOpenHook:null, xhrSendHook:null, xhrMeta:new WeakMap(),
   };
   const apiCaptureBtn=node('.api-capture');
   const apiClearBtn=node('.api-clear');
@@ -1275,7 +1308,7 @@
     } catch {
       return {text:'[请求/响应体读取失败]',truncated:true};
     } finally {
-      try {await reader.cancel();}catch{/* read clone only */}
+      try {void reader.cancel().catch(()=>{});}catch{/* read clone only */}
       try {reader.releaseLock();}catch{/* ignore */}
     }
     return {text,truncated};
@@ -1318,12 +1351,14 @@
     browserState.bodyEnabled=Boolean(apiBodyOpt.checked);
     apiBodyOpt.disabled=true;
 
+    const fetchBeforeHook=window.fetch;
+    browserState.fetchOriginal=fetchBeforeHook;
     const wrappedFetch=function(input,init){
       const method=init?.method ?? input?.method ?? 'GET';
       const rec=apiRecord(input,method,'fetch');
       // Start original immediately; don't await clone/body inspection.
       let promise;
-      try {promise=pageFetchOriginal.apply(this,arguments);}
+      try {promise=fetchBeforeHook.apply(this,arguments);}
       catch(e) {if(rec)apiFinish(rec,'调用异常');throw e;}
       if(!rec)return promise;
       const same=()=>browserState.sessionID===state.session && browserState.generation===state.generation;
@@ -1408,8 +1443,9 @@
     browserState.bodyEnabled=false;
     apiBodyOpt.disabled=false;
     if(browserState.fetchHook && window.fetch===browserState.fetchHook)
-      window.fetch=pageFetchOriginal;
+      window.fetch=browserState.fetchOriginal;
     browserState.fetchHook=null;
+    browserState.fetchOriginal=null;
     const proto=window.XMLHttpRequest?.prototype;
     if(proto && browserState.xhrOpenHook && proto.open===browserState.xhrOpenHook.wrapped)
       proto.open=browserState.xhrOpenHook.original;
@@ -2086,6 +2122,9 @@
       if (activeView === 'diagnostics' && diagnosticMode!=='browser' && diagnosticMode!=='history') renderDiagnostic(true);
       resetHistory();
       stopBrowserCapture();
+      browserState.rows=[];
+      browserState.rawLock=false;
+      if(diagnosticMode==='browser')renderBrowserRequests(true);
       state.session = id;
       state.generation++;
       resetView();
