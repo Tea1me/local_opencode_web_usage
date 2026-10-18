@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode Web 原生侧栏使用量
 // @namespace    https://github.com/Tea1me/local_opencode_web_usage
-// @version      0.4.0
-// @description  将使用量嵌入到原生审查/上下文同一侧栏的标签页（无需额外右侧列）
+// @version      0.5.0
+// @description  原生同栏使用量：增加 TPS、TPM、TTFT 实时观测
 // @author       Tea1me & ChatGPT
 // @match        http://127.0.0.1:4096/*
 // @match        http://localhost:4096/*
@@ -160,6 +160,23 @@
         display: block; font-variant-numeric: tabular-nums; font-size: 17px;
         color: var(--oc-fg); letter-spacing: -.4px; overflow-wrap: anywhere;
       }
+      .perf-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 9px;
+      }
+      .perf-tile {
+        min-width: 0; border: 1px solid var(--oc-border);
+        background: var(--oc-layer); border-radius: 9px;
+        padding: 11px 9px;
+      }
+      .perf-tile small { display: block; font-size: 11px; color: var(--oc-muted); margin-bottom: 8px; }
+      .perf-tile strong {
+        display: block; overflow-wrap: anywhere;
+        color: var(--oc-fg); font-size: 16px;
+        font-variant-numeric: tabular-nums;
+      }
+      .perf-status { color: var(--oc-muted); font-size: 11px; line-height: 1.5; margin-top: 8px; }
       .subhead {
         font-size: 11px; letter-spacing: .2px; color: var(--oc-muted);
         margin: 17px 0 10px; font-weight: 600;
@@ -239,6 +256,13 @@
             <span><i class="dot cache"></i>缓存读</span>
             <span><i class="dot write"></i>缓存写</span>
           </div>
+          <div class="subhead">实时性能 · 仅当前页面观测</div>
+          <div class="perf-grid">
+            <div class="perf-tile"><small>最近 TPS</small><strong data-perf="tps">—</strong></div>
+            <div class="perf-tile"><small>60 秒 TPM</small><strong data-perf="tpm">—</strong></div>
+            <div class="perf-tile"><small>最近 TTFT</small><strong data-perf="ttft">—</strong></div>
+          </div>
+          <div class="perf-status" data-perf-status aria-live="polite">正在连接原生实时事件…</div>
           <div class="subhead">会话详情</div>
           <div class="rows">
             <span class="label">缓存读取占比</span><span class="value" data-value="hitRate">—</span>
@@ -260,6 +284,9 @@
   const segments = Object.fromEntries([...shadow.querySelectorAll('[data-seg]')]
     .map((element) => [element.dataset.seg, element]));
   const refreshBtn = node('.refresh');
+  const perfValues = Object.fromEntries([...shadow.querySelectorAll('[data-perf]')]
+    .map((element) => [element.dataset.perf, element]));
+  const perfStatus = node('[data-perf-status]');
 
 
   const nativeTab = node('.native-tab');
@@ -431,6 +458,7 @@
     return sum;
   }
   function resetView() {
+    resetPerformance();
     Object.values(values).forEach((item) => { item.textContent = '—'; });
     Object.values(segments).forEach((item) => { item.style.width = '0%'; });
   }
@@ -480,6 +508,145 @@
     }
   }
 
+
+  // V2 /api/event broadcasts live server events. The server's session summary
+  // does not contain these timing metrics, so only measurements seen while this
+  // browser is observing the stream are considered authoritative.
+  const performance = {
+    sessionID: null,
+    attempts: new Map(),
+    completed: new Map(),
+    latest: null,
+    source: '连接中',
+    connected: false,
+    seenAny: false,
+  };
+  let stream = null;
+
+  function resetPerformance() {
+    performance.sessionID = state.session;
+    performance.attempts.clear();
+    performance.completed.clear();
+    performance.latest = null;
+    renderPerformance();
+  }
+
+  function timeMs(value) {
+    const ms = typeof value === 'number' ? value :
+      (typeof value === 'string' ? Date.parse(value) : NaN);
+    return Number.isFinite(ms) && ms > 0 ? ms : null;
+  }
+
+  function tokenTotal(tokens) {
+    const t = tokens || {};
+    return number(t.input) + number(t.output) + number(t.reasoning) +
+      number(t.cache?.read) + number(t.cache?.write);
+  }
+
+  function renderPerformance() {
+    const now = Date.now();
+    const ttl = now - 60000;
+    for (const [key, record] of performance.completed) {
+      if (record.time < ttl) performance.completed.delete(key);
+    }
+    const recent = [...performance.completed.values()];
+    const tpm = recent.reduce((total, record) => total + record.tokens, 0);
+    perfValues.tps.textContent = performance.latest?.tps == null
+      ? '—' : performance.latest.tps.toFixed(1) + ' tok/s';
+    perfValues.ttft.textContent = performance.latest?.ttft == null
+      ? '—' : format(performance.latest.ttft) + ' ms';
+    perfValues.tpm.textContent = performance.connected && performance.seenAny
+      ? format(tpm) : '—';
+    const stateInfo = performance.connected ? '已连接 /api/event' : performance.source;
+    perfStatus.textContent = stateInfo +
+      ' · 当前页观测窗口；重载后不补算历史' +
+      (performance.latest ? ' · 最近有效请求' : ' · 等待下一次生成');
+  }
+
+  function handlePerfEvent(event) {
+    if (!event || !event.type || !event.data ||
+      event.data.sessionID !== currentSession() || !state.session) return;
+    performance.seenAny = true;
+    const data = event.data;
+    const id = data.assistantMessageID;
+    if (!id || typeof id !== 'string') return;
+    const created = timeMs(event.created) ?? Date.now();
+
+    // A single assistant step is one provider request, including tool steps.
+    if (event.type === 'session.step.started') {
+      const started = timeMs(data.started) ?? created;
+      performance.attempts.set(id, { started, first: null, streamed: null });
+    } else if (event.type === 'session.text.delta' ||
+               event.type === 'session.reasoning.delta') {
+      // Started events may be placeholders. Only a nonempty delta is first output.
+      if (typeof data.delta !== 'string' || !data.delta.trim()) return;
+      const attempt = performance.attempts.get(id);
+      if (attempt && attempt.first == null) attempt.first = created;
+    } else if (event.type === 'session.step.streamed') {
+      const attempt = performance.attempts.get(id);
+      if (attempt) attempt.streamed = created;
+    } else if (event.type === 'session.step.ended') {
+      const attempt = performance.attempts.get(id);
+      performance.attempts.delete(id);
+      if (!data.tokens || !attempt) {
+        renderPerformance();
+        return;
+      }
+      // "TPM" is the number of usage tokens recorded in the last 60s,
+      // NOT the provider's billing quota or live input rate.
+      performance.completed.set(id, { time: created, tokens: tokenTotal(data.tokens) });
+      const outputTokens = number(data.tokens.output);
+      const streamed = attempt.streamed;
+      const seconds = streamed == null ? null : (streamed - attempt.started) / 1000;
+      const tps = seconds > 0 && outputTokens > 0 ? outputTokens / seconds : null;
+      const ttft = attempt.first == null ? null : attempt.first - attempt.started;
+      if (tps != null || (ttft != null && ttft >= 0)) {
+        performance.latest = {
+          tps,
+          ttft: ttft != null && ttft >= 0 ? ttft : null,
+        };
+      }
+    } else if (event.type === 'session.step.failed') {
+      performance.attempts.delete(id);
+    } else {
+      return;
+    }
+    // Bound attempts in long-running sessions; events without a start are ignored.
+    if (performance.attempts.size > 100) {
+      const oldest = performance.attempts.keys().next().value;
+      performance.attempts.delete(oldest);
+    }
+    renderPerformance();
+  }
+
+  function connectPerformance() {
+    if (!('EventSource' in window) || stream) return;
+    try {
+      stream = new EventSource('/api/event', { withCredentials: true });
+      performance.source = '连接中';
+      stream.addEventListener('open', () => {
+        performance.connected = true;
+        performance.source = '已连接';
+        renderPerformance();
+      });
+      stream.addEventListener('error', () => {
+        performance.connected = false;
+        performance.source = '事件流断开，等待重新连接';
+        // Do not use stale timestamps after an SSE gap.
+        performance.attempts.clear();
+        renderPerformance();
+      });
+      stream.addEventListener('message', (message) => {
+        let event;
+        try { event = JSON.parse(message.data); } catch { return; }
+        handlePerfEvent(event);
+      });
+    } catch {
+      performance.source = '此版本无法建立事件流';
+      renderPerformance();
+    }
+  }
+
   function syncRoute() {
     const id = currentSession();
     host.dataset.theme = detectTheme();
@@ -494,7 +661,9 @@
   }
 
   syncRoute();
+  connectPerformance();
   setInterval(syncRoute, CONFIG.routeCheckMs);
+  setInterval(renderPerformance, 1000);
   setInterval(() => void refresh(), CONFIG.refreshMs);
   window.addEventListener('resize', syncPlacement);
   document.addEventListener('visibilitychange', () => {
