@@ -1,17 +1,17 @@
 # OpenCode Web Usage
 
-给本地 `opencode web` 加一个与原生「审查 / 上下文」同栏的 **使用量** 标签。显示会话累计 Token、缓存复用、费用及 TPS/TPM/TTFT，并提供可手动开启的模型/工具执行诊断，并支持点击查看已保存的完整工具参数、返回结果。
+给本地 `opencode web` 加一个与原生「审查 / 上下文」同栏的 **使用量** 标签。显示会话累计 Token、缓存复用、费用及 TPS/TPM/TTFT，并提供可手动开启的模型/工具执行诊断，并支持按需查看已保存的模型消息/响应、工具输入参数与执行结果。
 
 | 方案 | 状态 | 适合 |
 | --- | --- | --- |
-| [油猴 v0.9.0](./opencode-web-usage.user.js) | **推荐日常使用**；JS 语法已通过；1.19.x 实时指标已由用户截图验证，新增折叠功能待浏览器实测 | 已安装的 OpenCode 1.19.x、兼容新版本 |
+| [油猴 v0.10.0](./opencode-web-usage.user.js) | **推荐日常使用**；JS 语法已通过；1.19.x 实时指标已由用户截图验证，新增折叠功能待浏览器实测 | 已安装的 OpenCode 1.19.x、兼容新版本 |
 | [原生 Panel 实验](./native-experiment/INTEGRATION.md) | 需要编译 OpenCode 源码；未编译实测 | 想把标签真正注册到 GUI 扩展系统 |
 
 ## 安装 / 更新
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/)。
 2. 打开 [**油猴脚本 Raw 地址**](https://raw.githubusercontent.com/Tea1me/local_opencode_web_usage/Tea1me/tea1me.github.io/opencode-web-usage.user.js)，在油猴中更新或重新安装。
-3. 确认用户脚本顶部为 **`@version 0.9.0`**，不要同时启用旧脚本。之后用 Ctrl + Shift + R 刷新。
+3. 确认用户脚本顶部为 **`@version 0.10.0`**，不要同时启用旧脚本。之后用 Ctrl + Shift + R 刷新。
 4. 正常运行 `opencode web`，进入已有会话、打开右侧原生面板，再点击「▥ 使用量」。
 
 本脚本针对 `http://127.0.0.1:4096/` 和 `http://localhost:4096/`；其他端口需自行改 `@match`。
@@ -33,6 +33,18 @@
 仅当服务商把内容作为 `reasoning` 类型交给 OpenCode 时，才能折叠。若某些模型把“思考过程”直接写入常规 `text` 答案，而不是独立 reasoning part，脚本不会猜测并自动隐藏，否则容易错误折叠正常文本。
 
 折叠按钮由 CSS 伪元素模拟，**并非上游真正的原生 Accordion**。OpenCode 将来的 DOM 结构变更可能需要更新匹配方式。对响应本身、Token/TPS 统计没有影响。
+
+## v0.10.0：模型消息创建/结束可展开
+
+「使用量 → 网络诊断」开始捕获后，「模型消息创建」「模型响应结束」下会出现 **查看模型消息详情** 按钮（部分携带消息 ID 的模型步骤事件也有）。按需读取：
+
+- **assistant 消息元数据**：消息 ID、provider/model、Token、费用、开始/完成时间、结束原因、错误等；
+- **responseParts**：保存的模型回复文字、reasoning 和工具调用相关 Part；
+- **关联用户消息**：若能从助手消息的 `parentID` 获取，显示该用户消息的 info 与 parts；没有时明确显示不可用。
+
+这是 OpenCode 本地**会话消息记录**，不能称为真正的模型供应商 HTTP Request/Response：完整 system prompt、上下文拼装、供应商 Headers/API key、流式 wire body 不一定会保存在数据库中。按需打开可能看到 CTF 凭据、Flag 等敏感内容，请检查后再分享。
+
+默认时间线的「复制脱敏日志」仍**不会附带原始消息**；内容只在本地点击后读取，收起时清除显示。没有向模型接口重新请求。
 
 ## v0.9.0：完整工具调用历史（按需查看）
 
