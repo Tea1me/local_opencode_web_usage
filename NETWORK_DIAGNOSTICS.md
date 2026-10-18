@@ -1,5 +1,20 @@
 # 网络诊断：事件面板、工具运行与 HTTP/SSH 流量边界
 
+## v0.11.0：关联视图（按一次用户轮次串起完整链路）
+
+在「网络诊断」开始捕获后，切换 **时间线 / 关联视图**：
+
+- 优先利用 `assistant.id`、`assistant.parentID`、`part.messageID`、`part.callID` 精确建立记录关联；同一个 `parentID` 的多次模型请求与工具调用归成同一个对话轮次；
+- 展示模型开始/结束、工具执行中/完成、失败与重试（仅上游事件实际存在时），组内按真实捕获时间排序；
+- 显示每组时间范围、记录跨度、观察到的不同助手消息数、不同工具调用数及错误数。**跨度不等于网络 RTT**；
+- 缺乏稳定关联 ID 的 SSE 事件进入「未关联到消息的事件」，不臆测它属于哪次调用；
+- 保留每条事件的原始本地消息详情按钮，但原始数据仅在按需点击时读取；
+- 默认导出 JSON 始终只有脱敏事件元数据，不携带 `parentID`、`callID`、原始模型消息和工具输入输出。最多保留 200 条，跨会话隔离。
+
+这一视图只是**关联前端收到的已有事件**，不会静默回溯整个会话；如果需要历史消息，可使用 [消息分页 API](https://github.com/anomalyco/opencode/blob/v1.19.2/packages/protocol/src/groups/message.ts) 读取会话已存储的数据。
+
+> 真实的请求/响应有三类：浏览器→OpenCode 的本地 API（浏览器 DevTools 可以看到）；OpenCode 后端→LLM Provider 的网络 HTTP（需要后端显式 instrumentation 或受控代理）；工具运行进程→CTF 目标的 HTTP/SSH（需要在工具、Playwright 网络 API 或独立采集层捕获）。不能用 ToolPart 反推出所有网络层 HTTP 请求。
+
 ## v0.10.0：模型消息创建/响应结束按需展开
 
 已将与工具原始详情相同的操作扩展到 **「模型消息创建」「模型响应结束」**，以及带 `assistantMessageID` 的部分模型步骤事件。
