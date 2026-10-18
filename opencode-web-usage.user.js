@@ -1217,6 +1217,264 @@
     renderHistory();
   });
 
+
+  // Opt-in observation of same-origin *browser* API traffic only.
+  // No read/modify of the response passed back to OpenCode's application.
+  const browserState = {
+    enabled:false, sessionID:null, generation:0, bodyEnabled:false,
+    rows:[], maxRows:120, counter:0, rawLock:false,
+    fetchHook:null, xhrOpenHook:null, xhrSendHook:null, xhrMeta:new WeakMap(),
+  };
+  const apiCaptureBtn=node('.api-capture');
+  const apiClearBtn=node('.api-clear');
+  const apiBodyOpt=node('.api-body-opt');
+  const apiStatus=node('.api-status');
+  const apiRecords=node('.api-records');
+  const apiLimit=16384;
+
+  function apiURL(input) {
+    try {
+      const url=new URL(typeof input==='string'?input:input?.url,location.href);
+      if(url.origin!==location.origin)return null;
+      if(!/^\/(?:api(?:\/|$)|session(?:\/|$)|provider(?:\/|$)|project(?:\/|$)|global(?:\/|$))/.test(url.pathname))return null;
+      const safe=url.pathname.split('/').map(segment=>{
+        if(/^(?:ses|msg|prt|call)_[a-zA-Z0-9_-]+$/.test(segment) ||
+           /^[0-9a-f]{16,}$/i.test(segment) ||
+           /^[0-9a-f]{8}-[0-9a-f-]{20,}$/i.test(segment))return ':id';
+        return segment.length>64?segment.slice(0,30)+':…':segment;
+      }).join('/');
+      return {href:url.href,path:safe.slice(0,256)};
+    } catch {return null;}
+  }
+  function apiAlive() {
+    return browserState.enabled && browserState.sessionID===state.session &&
+      browserState.generation===state.generation &&
+      currentSession()===state.session;
+  }
+  function apiContentType(type) {
+    return /^(?:text\/(?!event-stream)|application\/(?:json|problem\+json|xml|javascript|x-www-form-urlencoded))/.test(type||'');
+  }
+  async function apiLimitedText(body) {
+    if(!body)return {text:'',truncated:false};
+    const reader=body.getReader();
+    const decoder=new TextDecoder('utf-8');
+    let len=0,text='',truncated=false;
+    try {
+      while(len<=apiLimit) {
+        const next=await reader.read();
+        if(next.done)break;
+        const bytes=next.value;
+        if(!(bytes instanceof Uint8Array)) {truncated=true;break;}
+        const rest=apiLimit-len;
+        const take=bytes.subarray(0,Math.max(0,rest));
+        text+=decoder.decode(take,{stream:true});
+        len+=take.byteLength;
+        if(bytes.byteLength>rest || len>=apiLimit){truncated=true;break;}
+      }
+      text+=decoder.decode();
+    } catch {
+      return {text:'[请求/响应体读取失败]',truncated:true};
+    } finally {
+      try {await reader.cancel();}catch{/* read clone only */}
+      try {reader.releaseLock();}catch{/* ignore */}
+    }
+    return {text,truncated};
+  }
+  function apiAdd(row) {
+    if(!apiAlive())return false;
+    browserState.rows.push(row);
+    if(browserState.rows.length>browserState.maxRows) browserState.rows.shift();
+    if(diagnosticMode==='browser' && activeView==='diagnostics')renderBrowserRequests();
+    return true;
+  }
+  function apiRefresh() {
+    if(diagnosticMode==='browser' && activeView==='diagnostics')renderBrowserRequests();
+  }
+  function apiRecord(url,method,via) {
+    if(!apiAlive())return null;
+    const path=apiURL(url);
+    if(!path)return null;
+    const row={
+      id:++browserState.counter,at:Date.now(),method:String(method||'GET').toUpperCase().slice(0,12),
+      path:path.path,via,status:'进行中',duration:null,
+      bodyCaptured:browserState.bodyEnabled,
+      // These fields are sensitive: never include in regular exported JSON.
+      rawURL:browserState.bodyEnabled?path.href:null,
+      requestBody:null,responseBody:null,contentType:null,
+    };
+    return apiAdd(row)?row:null;
+  }
+  function apiFinish(row,status) {
+    if(!row)return;
+    row.duration=Math.max(0,Date.now()-row.at);
+    row.status=status;
+    apiRefresh();
+  }
+  function installBrowserCapture() {
+    if(browserState.enabled)return;
+    browserState.enabled=true;
+    browserState.sessionID=state.session;
+    browserState.generation=state.generation;
+    browserState.bodyEnabled=Boolean(apiBodyOpt.checked);
+    apiBodyOpt.disabled=true;
+
+    const wrappedFetch=function(input,init){
+      const method=init?.method ?? input?.method ?? 'GET';
+      const rec=apiRecord(input,method,'fetch');
+      // Start original immediately; don't await clone/body inspection.
+      let promise;
+      try {promise=pageFetchOriginal.apply(this,arguments);}
+      catch(e) {if(rec)apiFinish(rec,'调用异常');throw e;}
+      if(!rec)return promise;
+      const same=()=>browserState.sessionID===state.session && browserState.generation===state.generation;
+      if(rec.bodyCaptured) {
+        if(typeof init?.body==='string'){
+          rec.requestBody=init.body.slice(0,apiLimit)+(init.body.length>apiLimit?'\n[已截断]':'');
+        }else if(typeof input==='object' && input?.body && typeof input.clone==='function' && !init?.body){
+          try {
+            const clone=input.clone();
+            void apiLimitedText(clone.body).then(part=>{
+              if(same()){rec.requestBody=part.text+(part.truncated?'\n[已截断]':'');apiRefresh();}
+            }).catch(()=>{});
+          }catch{/* non-replayable body */}
+        }else if(init?.body != null){rec.requestBody='[非文本请求体，未采集]';}
+      }
+      void Promise.resolve(promise).then(response=>{
+        if(!same())return;
+        apiFinish(rec,response.status);
+        const type=response.headers?.get('content-type')||'';
+        if(!rec.bodyCaptured || !apiContentType(type))return;
+        rec.contentType=type.slice(0,120);
+        try {
+          const clone=response.clone();
+          void apiLimitedText(clone.body).then(part=>{
+            if(!same())return;
+            rec.responseBody=part.text+(part.truncated?'\n[已截断]':'');
+            apiRefresh();
+          }).catch(()=>{});
+        }catch{/* already consumed/locked */}
+      },()=>{
+        if(same())apiFinish(rec,'网络异常');
+      });
+      return promise;
+    };
+    browserState.fetchHook=wrappedFetch;
+    window.fetch=wrappedFetch;
+
+    const proto=window.XMLHttpRequest?.prototype;
+    if(proto && typeof proto.open==='function' && typeof proto.send==='function'){
+      const previousOpen=proto.open,previousSend=proto.send;
+      const openHook=function(method,url){
+        browserState.xhrMeta.set(this,{url,method});
+        return previousOpen.apply(this,arguments);
+      };
+      const sendHook=function(body){
+        const info=browserState.xhrMeta.get(this);
+        const rec=info?apiRecord(info.url,info.method,'XHR'):null;
+        if(rec){
+          if(rec.bodyCaptured){
+            rec.requestBody=typeof body==='string'
+              ? body.slice(0,apiLimit)+(body.length>apiLimit?'\n[已截断]':'')
+              : body==null?null:'[非文本请求体，未采集]';
+          }
+          this.addEventListener('loadend',()=>{
+            if(browserState.sessionID!==state.session || browserState.generation!==state.generation)return;
+            apiFinish(rec,this.status||'网络异常');
+            if(!rec.bodyCaptured)return;
+            try{
+              const type=this.getResponseHeader('content-type')||'';
+              if(apiContentType(type) && (!this.responseType || this.responseType==='text')){
+                rec.contentType=type.slice(0,120);
+                const body=this.responseText;
+                rec.responseBody=body.slice(0,apiLimit)+(body.length>apiLimit?'\n[已截断]':'');
+              }
+            }catch{/* binary response or unavailable header */}
+            apiRefresh();
+          },{once:true});
+        }
+        try{return previousSend.apply(this,arguments);}
+        catch(e){if(rec)apiFinish(rec,'调用异常');throw e;}
+      };
+      browserState.xhrOpenHook={wrapped:openHook,original:previousOpen};
+      browserState.xhrSendHook={wrapped:sendHook,original:previousSend};
+      proto.open=openHook;
+      proto.send=sendHook;
+    }
+    renderBrowserRequests(true);
+  }
+  function stopBrowserCapture() {
+    browserState.enabled=false;
+    browserState.sessionID=null;
+    browserState.bodyEnabled=false;
+    apiBodyOpt.disabled=false;
+    if(browserState.fetchHook && window.fetch===browserState.fetchHook)
+      window.fetch=pageFetchOriginal;
+    browserState.fetchHook=null;
+    const proto=window.XMLHttpRequest?.prototype;
+    if(proto && browserState.xhrOpenHook && proto.open===browserState.xhrOpenHook.wrapped)
+      proto.open=browserState.xhrOpenHook.original;
+    if(proto && browserState.xhrSendHook && proto.send===browserState.xhrSendHook.wrapped)
+      proto.send=browserState.xhrSendHook.original;
+    browserState.xhrOpenHook=null;
+    browserState.xhrSendHook=null;
+    browserState.rawLock=false;
+    if(diagnosticMode==='browser')renderBrowserRequests(true);
+  }
+  function renderBrowserRequests(force=false) {
+    if(browserState.rawLock && !force)return;
+    apiCaptureBtn.textContent=browserState.enabled?'停止监控 API':'开始监控 API';
+    apiCaptureBtn.setAttribute('aria-pressed',String(browserState.enabled));
+    apiStatus.textContent=(browserState.enabled?'正在监控':'未监控')+
+      ' · '+browserState.rows.length+' 条本地请求（最多 120 条）'+
+      (browserState.enabled && browserState.bodyEnabled?' · 敏感正文采集已开启':' · 仅元数据')+
+      ' · 不含后端出站请求';
+    const fragment=document.createDocumentFragment();
+    for(const item of [...browserState.rows].reverse()){
+      const card=document.createElement('article');card.className='api-entry';
+      const label=document.createElement('strong');
+      label.textContent=item.method+' '+item.path;
+      const status=document.createElement('div');status.className='diag-detail';
+      status.textContent=item.via+' · '+item.status+' · '+(item.duration===null?'进行中':item.duration+' ms')+
+        ' · '+new Date(item.at).toLocaleTimeString('zh-CN');
+      card.append(label,status);
+      if(item.bodyCaptured){
+        const detail=document.createElement('pre');detail.hidden=true;
+        const toggle=document.createElement('button');toggle.type='button';
+        toggle.textContent='查看已采集的请求/响应（敏感）';
+        toggle.addEventListener('click',()=>{
+          if(!detail.hidden){detail.textContent='';detail.hidden=true;
+            browserState.rawLock=false;renderBrowserRequests(true);return;}
+          browserState.rawLock=true;
+          detail.textContent=JSON.stringify({
+            source:'本地浏览器 fetch / XHR（不是模型供应商出站 HTTP）',
+            method:item.method,url:item.rawURL,status:item.status,
+            requestBody:item.requestBody??'[未采集/不可用]',
+            responseBody:item.responseBody??'[未采集/不可用]',
+            contentType:item.contentType,
+          },null,2);
+          detail.hidden=false;toggle.textContent='收起并清除原始正文';
+        });
+        card.append(toggle,detail);
+      }
+      fragment.appendChild(card);
+    }
+    if(!browserState.rows.length){
+      const empty=document.createElement('p');empty.className='diag-note';
+      empty.textContent='点击开始监控后，在 OpenCode 中执行操作以产生本地 API 请求。';
+      fragment.appendChild(empty);
+    }
+    apiRecords.replaceChildren(fragment);
+  }
+  apiCaptureBtn.addEventListener('click',()=>{
+    if(browserState.enabled)stopBrowserCapture();
+    else installBrowserCapture();
+  });
+  apiClearBtn.addEventListener('click',()=>{
+    browserState.rows=[];
+    browserState.rawLock=false;
+    renderBrowserRequests(true);
+  });
+
   const nativeTab = node('.native-tab');
   let observedPanel = null;
 
@@ -1436,7 +1694,7 @@
   }
 
   async function jsonGET(path) {
-    const response = await fetch(path, {
+    const response = await pageFetchOriginal.call(window,path, {
       credentials: 'same-origin',
       cache: 'no-store',
       headers: { Accept: 'application/json' },
