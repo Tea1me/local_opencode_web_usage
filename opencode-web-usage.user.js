@@ -383,7 +383,10 @@
       tab.setAttribute('aria-selected', String(selected));
       tab.tabIndex = selected ? 0 : -1;
     }
-    renderDiagnostic(true);
+    // Perf and its SSE state are initialized later in script startup.
+    // Rendering diagnostics before that point would hit perf's TDZ.
+    if (activeView === 'diagnostics') renderDiagnostic(true);
+    else diagRecords.replaceChildren();
   }
   for (const tab of shadow.querySelectorAll('.view-tab')) {
     tab.addEventListener('click', () => setView(tab.dataset.view));
