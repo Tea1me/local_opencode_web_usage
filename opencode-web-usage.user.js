@@ -1283,7 +1283,8 @@
 
   function apiURL(input) {
     try {
-      const url=new URL(typeof input==='string'?input:input?.url,location.href);
+      const url=new URL(typeof input==='string'?input:
+        (typeof input?.url==='string'?input.url:String(input)),location.href);
       if(url.origin!==location.origin)return null;
       if(!/^\/(?:api(?:\/|$)|session(?:\/|$)|provider(?:\/|$)|project(?:\/|$)|global(?:\/|$))/.test(url.pathname))return null;
       const safe=url.pathname.split('/').map(segment=>{
@@ -1377,7 +1378,8 @@
       try {promise=fetchBeforeHook.apply(this,arguments);}
       catch(e) {if(rec)apiFinish(rec,'调用异常');throw e;}
       if(!rec)return promise;
-      const same=()=>browserState.sessionID===state.session && browserState.generation===state.generation;
+      const same=()=>browserState.enabled && browserState.sessionID===state.session &&
+        browserState.generation===state.generation;
       if(rec.bodyCaptured) {
         if(typeof init?.body==='string'){
           rec.requestBody=init.body.slice(0,apiLimit)+(init.body.length>apiLimit?'\n[已截断]':'');
@@ -1429,7 +1431,7 @@
               : body==null?null:'[非文本请求体，未采集]';
           }
           this.addEventListener('loadend',()=>{
-            if(browserState.sessionID!==state.session || browserState.generation!==state.generation)return;
+            if(!apiAlive())return;
             apiFinish(rec,this.status||'网络异常');
             if(!rec.bodyCaptured)return;
             try{
