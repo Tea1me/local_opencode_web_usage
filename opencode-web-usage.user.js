@@ -987,6 +987,236 @@
   });
   setView('usage');
 
+
+  // Preserve the page's fetch implementation before our optional monitor hooks.
+  // Our own statistics/history lookups bypass the monitor to avoid self-noise.
+  const pageFetchOriginal = window.fetch;
+
+  const historyState = {
+    sessionID: null, generation: 0, loading: false, loaded: false,
+    abort: null, token: 0, rows: [], parents: new Map(),
+    page: 0, count: 0, pages: 0, truncated: false, legacy: false,
+    status: '尚未加载 · 点击「加载完整会话」',
+  };
+  const histLoadBtn = node('.hist-load');
+  const histCancelBtn = node('.hist-cancel');
+  const histStatus = node('.hist-status');
+  const histRecords = node('.hist-records');
+  const histOlder = node('.hist-older');
+  const histNewer = node('.hist-newer');
+  const histPage = node('.hist-page');
+
+  function historyTime(value, fallback) {
+    const n=typeof value==='string'?Date.parse(value):Number(value);
+    return Number.isFinite(n)&&n>100000000000 ? n : fallback;
+  }
+  function historyRowsFromMessage(item, parents) {
+    const info=item?.info??item;
+    if (!info || (info.role!=='assistant' && info.type!=='assistant') || typeof info.id!=='string') return [];
+    const mid=info.id;
+    if (typeof info.parentID==='string') parents.set(mid,info.parentID);
+    const created=historyTime(info.time?.created,Date.now());
+    const completed=historyTime(info.time?.completed,null);
+    const ref={kind:'model',messageID:mid};
+    const out=[{at:created,category:'model',kind:'model',title:'模型消息创建（历史）',
+      detail:'本地已存储的助手消息',reference:ref}];
+    const parts=Array.isArray(item?.parts) ? item.parts :
+      Array.isArray(info?.parts) ? info.parts : [];
+    for (const p of parts) {
+      if (p?.type==='tool' && typeof p.callID==='string') {
+        const tool=toolName(p.tool);
+        const start=historyTime(p.state?.time?.start,created);
+        const end=historyTime(p.state?.time?.end,null);
+        const tRef={kind:'tool',messageID:mid,callID:p.callID,
+          partID:typeof p.id==='string'?p.id:null};
+        out.push({at:start,category:'tool',kind:'tool',title:tool+' · 执行中（历史）',
+          detail:'历史工具调用',reference:tRef});
+        if (end && ['completed','error'].includes(p.state?.status)) {
+          const bad=p.state.status==='error';
+          out.push({at:end,category:'tool',kind:bad?'error':'tool',
+            title:tool+(bad?' · 执行失败（历史）':' · 已完成（历史）'),
+            detail:'耗时 '+Math.max(0,end-start)+' ms'+
+              (bad?' · '+errorCategory(p.state?.error):''),
+            reference:tRef});
+        }
+      } else if ((p?.type==='text'||p?.type==='reasoning') &&
+                 typeof p.text==='string' && p.text.length>0) {
+        out.push({at:historyTime(p.time?.start,created),category:'model',kind:'model',
+          title:p.type==='reasoning'?'推理内容（历史）':'模型文本输出（历史）',
+          detail:'内容按需展开，不在历史摘要中保存',reference:ref});
+      }
+    }
+    if (info.error) {
+      out.push({at:completed||created,category:'model',kind:'error',
+        title:'模型响应失败（历史）',detail:errorCategory(info.error),reference:ref});
+    } else if (completed) {
+      out.push({at:completed,category:'model',kind:'model',
+        title:'模型响应结束（历史）',
+        detail:'耗时 '+Math.max(0,completed-created)+' ms',
+        reference:ref});
+    }
+    return out;
+  }
+
+  function resetHistory() {
+    historyState.token++;
+    historyState.abort?.abort();
+    historyState.abort=null;
+    historyState.loading=false;
+    historyState.loaded=false;
+    historyState.sessionID=null;
+    historyState.rows=[];
+    historyState.parents.clear();
+    historyState.page=0;
+    historyState.count=0;
+    historyState.pages=0;
+    historyState.truncated=false;
+    historyState.legacy=false;
+    historyState.status='尚未加载 · 点击「加载完整会话」';
+    if (diagnosticMode==='history') renderHistory();
+  }
+
+  async function readHistoryJSON(path, signal) {
+    const res=await pageFetchOriginal.call(window,path,{
+      credentials:'same-origin',cache:'no-store',signal,
+      headers:{Accept:'application/json'},
+    });
+    if (!res.ok) throw Error('HTTP '+res.status);
+    const type=res.headers.get('content-type')||'';
+    if (!type.includes('json')) throw Error('不是 JSON 响应');
+    return res.json();
+  }
+  async function loadHistory() {
+    if (!state.session || historyState.loading) return;
+    resetHistory();
+    const sid=state.session;
+    const generation=state.generation;
+    const token=historyState.token;
+    historyState.loading=true;
+    historyState.sessionID=sid;
+    historyState.generation=generation;
+    historyState.abort=new AbortController();
+    const signal=historyState.abort.signal;
+    const alive=()=>!signal.aborted && token===historyState.token &&
+      state.session===sid && generation===state.generation && currentSession()===sid;
+    const uri=encodeURIComponent(sid);
+    const seenCursors=new Set();
+    let cursor=null;
+    let lastPageHadCursor=false;
+    try {
+      for (let page=0;page<50;page++) {
+        if (!alive()) return;
+        const path='/api/session/'+uri+'/message?limit=200'+
+          (cursor ? '&cursor='+encodeURIComponent(cursor) : '&order=asc');
+        let data;
+        try {data=await readHistoryJSON(path,signal);}
+        catch (e) {
+          if (page!==0) throw e;
+          // A legacy endpoint may lack cursors; show partial coverage clearly.
+          const legacy=await readHistoryJSON('/session/'+uri+'/message?limit=10000',signal);
+          if (!alive()) return;
+          const items=Array.isArray(legacy)?legacy:legacy?.data;
+          if (!Array.isArray(items)) throw Error('旧接口没有返回消息列表');
+          historyState.legacy=true;
+          historyState.count=items.length;
+          historyState.pages=1;
+          for(const item of items)historyState.rows.push(...historyRowsFromMessage(item,historyState.parents));
+          historyState.status='旧消息接口：读取 '+items.length+' 条（无法验证历史是否完整）';
+          lastPageHadCursor=false;
+          break;
+        }
+        if (!alive()) return;
+        if (!Array.isArray(data?.data) || !data?.cursor ||
+            typeof data.cursor!=='object') throw Error('游标分页响应格式不兼容');
+        historyState.count+=data.data.length;
+        historyState.pages++;
+        for (const item of data.data)
+          historyState.rows.push(...historyRowsFromMessage(item,historyState.parents));
+        const next=data.cursor.next;
+        lastPageHadCursor=Boolean(next);
+        historyState.status='已读取 '+historyState.count+' 条消息 / '+historyState.pages+' 页…';
+        if (diagnosticMode==='history') renderHistory();
+        if (!next) break;
+        if (typeof next!=='string'||seenCursors.has(next))throw Error('消息游标循环');
+        seenCursors.add(next);
+        cursor=next;
+      }
+      if (!alive()) return;
+      historyState.truncated=lastPageHadCursor;
+      historyState.rows.sort((a,b)=>a.at-b.at);
+      historyState.loaded=true;
+      historyState.status='已读 '+historyState.count+' 条消息 / '+historyState.pages+
+        ' 页，提取 '+historyState.rows.length+' 条诊断步骤'+
+        (historyState.truncated?'；触及 50 页上限，可能未覆盖全部历史':'')+
+        (historyState.legacy?'；旧接口完整性未证实':'');
+    } catch(e) {
+      if (alive()) historyState.status='历史读取失败：'+String(e?.message||e);
+    } finally {
+      if (token===historyState.token) {
+        historyState.loading=false;
+        historyState.abort=null;
+        if(diagnosticMode==='history')renderHistory();
+      }
+    }
+  }
+  function renderHistory() {
+    histLoadBtn.disabled=historyState.loading || !state.session;
+    histCancelBtn.disabled=!historyState.loading;
+    histStatus.textContent=historyState.status;
+    const size=100,total=historyState.rows.length;
+    const maxPage=Math.max(0,Math.ceil(total/size)-1);
+    historyState.page=Math.min(historyState.page,maxPage);
+    histNewer.disabled=historyState.page===0;
+    histOlder.disabled=historyState.page>=maxPage;
+    histPage.textContent=total ? '诊断步骤 '+(historyState.page*size+1)+'–'+
+      Math.min((historyState.page+1)*size,total)+' / '+total : '尚无已存储步骤';
+    const end=total-historyState.page*size;
+    const start=Math.max(0,end-size);
+    const rows=historyState.rows.slice(start,end);
+    const groups=buildDiagnosticGroups(rows,historyState.parents);
+    const fragment=document.createDocumentFragment();
+    if (!groups.length) {
+      const empty=document.createElement('p');
+      empty.className='diag-note';
+      empty.textContent='点击加载历史；只显示已保存且带助手消息标识的事件。';
+      fragment.appendChild(empty);
+    }
+    for(const group of groups) {
+      const box=document.createElement('section');box.className='diag-group';
+      box.dataset.hasError=String(group.errors>0);
+      const head=document.createElement('div');head.className='diag-group-head';
+      const title=document.createElement('div');title.className='diag-group-title';title.textContent=group.label;
+      const subtitle=document.createElement('div');subtitle.className='diag-group-meta';
+      subtitle.textContent=group.messageIDs.size+' 条助手消息 · '+
+        group.toolCalls.size+' 个工具调用 · '+group.errors+' 条异常';
+      head.append(title,subtitle);
+      const body=document.createElement('div');body.className='diag-group-body';
+      for(const row of group.items)body.appendChild(makeDiagnosticCard(row));
+      box.append(head,body);fragment.appendChild(box);
+    }
+    histRecords.replaceChildren(fragment);
+  }
+  histLoadBtn.addEventListener('click',()=>void loadHistory());
+  histCancelBtn.addEventListener('click',()=>{
+    historyState.abort?.abort();
+    historyState.token++;
+    historyState.abort=null;
+    historyState.loading=false;
+    historyState.status='已停止；已读取 '+historyState.count+
+      ' 条，当前结果不完整，可重新加载';
+    renderHistory();
+  });
+  histOlder.addEventListener('click',()=>{
+    historyState.page++;
+    diagnostic.rawLock=false;
+    renderHistory();
+  });
+  histNewer.addEventListener('click',()=>{
+    historyState.page=Math.max(0,historyState.page-1);
+    diagnostic.rawLock=false;
+    renderHistory();
+  });
+
   const nativeTab = node('.native-tab');
   let observedPanel = null;
 
