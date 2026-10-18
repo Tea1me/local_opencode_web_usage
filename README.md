@@ -4,23 +4,41 @@
 
 | 方案 | 状态 | 适合 |
 | --- | --- | --- |
-| [油猴 v0.6.1](./opencode-web-usage.user.js) | **推荐日常使用**；JS 语法与计算用例验证，待你本机复测 | 已安装的 OpenCode 1.19.x、兼容新版本 |
+| [油猴 v0.7.0](./opencode-web-usage.user.js) | **推荐日常使用**；JS 语法已通过；1.19.x 实时指标已由用户截图验证，新增折叠功能待浏览器实测 | 已安装的 OpenCode 1.19.x、兼容新版本 |
 | [原生 Panel 实验](./native-experiment/INTEGRATION.md) | 需要编译 OpenCode 源码；未编译实测 | 想把标签真正注册到 GUI 扩展系统 |
 
 ## 安装 / 更新
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/)。
 2. 打开 [**油猴脚本 Raw 地址**](https://raw.githubusercontent.com/Tea1me/local_opencode_web_usage/Tea1me/tea1me.github.io/opencode-web-usage.user.js)，在油猴中更新或重新安装。
-3. 确认用户脚本顶部为 **`@version 0.6.1`**，不要同时启用旧脚本。之后用 Ctrl + Shift + R 刷新。
+3. 确认用户脚本顶部为 **`@version 0.7.0`**，不要同时启用旧脚本。之后用 Ctrl + Shift + R 刷新。
 4. 正常运行 `opencode web`，进入已有会话、打开右侧原生面板，再点击「▥ 使用量」。
 
 本脚本针对 `http://127.0.0.1:4096/` 和 `http://localhost:4096/`；其他端口需自行改 `@match`。
+
+## 思考内容逐段折叠（新增 v0.7.0）
+
+在 **OpenCode v1.19.2** 源码中，模型 reasoning 有独立 HTML 标记 `[data-component="reasoning-part"]`；旧版界面没有逐段收起按钮。
+
+脚本提供：
+
+- **默认折叠**：安装后，模型 reasoning 以「▸ 思考内容已折叠 · 点击展开」占位行展示。
+- **逐段操作**：点击占位行可展开原生 Markdown 推理内容；展开后点击该段顶部「▾ 思考内容 · 点击折叠」再次收起。正文中的链接、选区和代码操作不作为折叠按钮。
+- **全局开关**：在「使用量」标签 → **思考内容 → 默认折叠 reasoning** 可以开启/关闭，设置仅保存在浏览器本地；点击总开关会清除当前页面的逐段临时覆盖，以确保立刻生效。
+- **虚拟滚动兼容**：按会话和 part ID 保存有限的逐段覆盖状态，虚拟列表重建 DOM 时尽量恢复；观察器跳过思考块内部流式 Markdown 节点，避免每个 token 触发整棵 DOM 扫描。
+- **非侵入**：只通过额外样式控制 reasoning 容器直接子节点的可见性，不移动或删除 Solid 管理的节点，也不读取、改写模型响应内容。
+
+**注意：** 请在 OpenCode 原生「设置 → 常规 → 显示推理摘要」中保持**开启**，否则宿主本身就不会渲染 reasoning 块，脚本无法在隐藏的内容上生成折叠入口。
+
+仅当服务商把内容作为 `reasoning` 类型交给 OpenCode 时，才能折叠。若某些模型把“思考过程”直接写入常规 `text` 答案，而不是独立 reasoning part，脚本不会猜测并自动隐藏，否则容易错误折叠正常文本。
+
+折叠按钮由 CSS 伪元素模拟，**并非上游真正的原生 Accordion**。OpenCode 将来的 DOM 结构变更可能需要更新匹配方式。对响应本身、Token/TPS 统计没有影响。
 
 ## 为什么之前的 TPS/TTFT 是「—」？
 
 原脚本 v0.5.0 只订阅 2.x 的 `/api/event`、`session.step.*` 事件；**OpenCode 1.19.2 仍属于 1.x**，主要使用 `/global/event`、`/event` 和 `message.updated`、`message.part.updated`、`message.part.delta`。
 
-v0.6.1 的采集顺序：
+v0.7.0 沿用的采集顺序：
 
 1. 优先尝试 `/global/event`（跨项目 1.x SSE）；连接失败尝试 `/event`（单项目 SSE），再尝试 `/api/event`（2.x SSE）。
 2. **并行备用方案**：面板展开时每 10 秒查询 `/session/{id}/message?limit=80` 的最近记录（失败再尝试带 `/api` 前缀），不依赖 SSE 一定稳定。
