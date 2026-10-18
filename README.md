@@ -4,14 +4,14 @@
 
 | 方案 | 状态 | 适合 |
 | --- | --- | --- |
-| [油猴 v0.7.0](./opencode-web-usage.user.js) | **推荐日常使用**；JS 语法已通过；1.19.x 实时指标已由用户截图验证，新增折叠功能待浏览器实测 | 已安装的 OpenCode 1.19.x、兼容新版本 |
+| [油猴 v0.7.1](./opencode-web-usage.user.js) | **推荐日常使用**；JS 语法已通过；1.19.x 实时指标已由用户截图验证，新增折叠功能待浏览器实测 | 已安装的 OpenCode 1.19.x、兼容新版本 |
 | [原生 Panel 实验](./native-experiment/INTEGRATION.md) | 需要编译 OpenCode 源码；未编译实测 | 想把标签真正注册到 GUI 扩展系统 |
 
 ## 安装 / 更新
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/)。
 2. 打开 [**油猴脚本 Raw 地址**](https://raw.githubusercontent.com/Tea1me/local_opencode_web_usage/Tea1me/tea1me.github.io/opencode-web-usage.user.js)，在油猴中更新或重新安装。
-3. 确认用户脚本顶部为 **`@version 0.7.0`**，不要同时启用旧脚本。之后用 Ctrl + Shift + R 刷新。
+3. 确认用户脚本顶部为 **`@version 0.7.1`**，不要同时启用旧脚本。之后用 Ctrl + Shift + R 刷新。
 4. 正常运行 `opencode web`，进入已有会话、打开右侧原生面板，再点击「▥ 使用量」。
 
 本脚本针对 `http://127.0.0.1:4096/` 和 `http://localhost:4096/`；其他端口需自行改 `@match`。
@@ -33,6 +33,20 @@
 仅当服务商把内容作为 `reasoning` 类型交给 OpenCode 时，才能折叠。若某些模型把“思考过程”直接写入常规 `text` 答案，而不是独立 reasoning part，脚本不会猜测并自动隐藏，否则容易错误折叠正常文本。
 
 折叠按钮由 CSS 伪元素模拟，**并非上游真正的原生 Accordion**。OpenCode 将来的 DOM 结构变更可能需要更新匹配方式。对响应本身、Token/TPS 统计没有影响。
+
+## 助手消息数（v0.7.1 修复）
+
+旧版面板一直显示「助手消息数 —（会话汇总）」是因为会话汇总返回了 Token/费用，但不包含助手消息条数。
+
+现在汇总数据仍独立刷新，助手消息数在后台单独读取：
+
+- 优先通过 **OpenCode 1.19.2** 的 `/api/session/{id}/message?limit=200&order=desc` 读取完整消息列表；每页最多 200 条，沿 `cursor.next` 逐页累计 **`type === "assistant"`**，也兼容 `info.role === "assistant"` 格式。
+- 最多扫描 50 页（10,000 条消息）。若超过上限，显示「≥N（超过统计上限）」而不是不准确的总数。
+- 每 60 秒更新一次，手动刷新会重新统计；结果最多缓存 8 个会话，不影响每 10 秒的 Token 和性能刷新。
+- 当分页 API 不可用时尝试老的 `/session/{id}/message`，会标成「N（已读取）」表示旧接口的覆盖范围可能不完整；失败则显示「—（消息接口不可用）」。
+- 切换会话时停止对旧会话继续翻页，不把旧会话消息数写到新会话。
+
+**消息数 ≠ 用户提问轮数**：一次用户提示可能对应多条 assistant 消息（模型继续、工具调用前后等），因此通常比用户消息数大。
 
 ## 为什么之前的 TPS/TTFT 是「—」？
 
