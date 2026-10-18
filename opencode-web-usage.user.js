@@ -636,11 +636,19 @@
         performance.attempts.clear();
         renderPerformance();
       });
-      stream.addEventListener('message', (message) => {
+      const receive = (message) => {
         let event;
         try { event = JSON.parse(message.data); } catch { return; }
         handlePerfEvent(event);
-      });
+      };
+      stream.addEventListener('message', receive);
+      // Some SSE implementations emit named events rather than default "message".
+      // Both variants are handled, without depending on OpenCode's app internals.
+      for (const name of [
+        'session.step.started', 'session.step.streamed',
+        'session.step.ended', 'session.step.failed',
+        'session.text.delta', 'session.reasoning.delta',
+      ]) stream.addEventListener(name, receive);
     } catch {
       performance.source = '此版本无法建立事件流';
       renderPerformance();
