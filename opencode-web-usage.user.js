@@ -899,16 +899,34 @@
   });
   diagFilter.addEventListener('change',()=>{diagnostic.rawLock=false;renderDiagnostic(true);});
   diagCopyButton.addEventListener('click',async()=>{
-    const rows=diagnostic.rows.map(row=>({
+    const sanitized = row => ({
       time:new Date(row.at).toISOString(),
       category:row.category,
       kind:row.kind,
       title:row.title,
       detail:row.detail
-    }));
+    });
+    const rows=diagnostic.rows.map(sanitized);
+    const linked=diagnosticMode === 'linked'
+      ? buildDiagnosticGroups(diagnostic.rows,diagnostic.messageParents)
+        .map((group,index)=>({
+          group:index+1,
+          linkedBy:group.key==='unlinked'?'none':
+            group.key.startsWith('turn:')?'parentID':'messageID',
+          start:new Date(group.first).toISOString(),
+          end:new Date(group.last).toISOString(),
+          assistantMessages:group.messageIDs.size,
+          toolCalls:group.toolCalls.size,
+          errors:group.errors,
+          events:group.items.map(sanitized),
+        }))
+      : null;
     try {
       await navigator.clipboard.writeText(JSON.stringify({
-        schema:'opencode-diagnostics-v1',note:'脱敏元数据；不含命令、请求正文、响应正文与认证头',events:rows
+        schema:'opencode-diagnostics-v1',
+        note:'脱敏元数据；不含原始标识、命令、请求正文、响应正文与认证头',
+        events:rows,
+        ...(linked?{linkedGroups:linked}:{}),
       },null,2));
       diagCopyButton.textContent='已复制';
     } catch {
