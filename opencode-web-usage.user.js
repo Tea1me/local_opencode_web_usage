@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode Web 原生侧栏使用量
 // @namespace    https://github.com/Tea1me/local_opencode_web_usage
-// @version      0.11.0
-// @description  新增模型请求/工具调用关联视图：按轮次串联模型、工具、失败和后续回复
+// @version      0.12.0
+// @description  新增可分页会话历史回溯与浏览器本地 API 请求监控（可选正文）
 // @author       Tea1me & ChatGPT
 // @match        http://127.0.0.1:4096/*
 // @match        http://localhost:4096/*
@@ -173,6 +173,17 @@
       .diag-group-body .diag-record { position: relative; margin-bottom: 8px; }
       .diag-group-body .diag-record::before { content: ""; position: absolute; top: 16px; left: -19px; width: 11px; border-top: 2px solid var(--oc-border); }
       .diag-group[data-has-error="true"] > .diag-group-head { border-left: 3px solid #cd493d; }
+      .diag-subview { display: none; }
+      .diag-subview[data-visible="true"] { display: block; }
+      .diag-controls label { display: inline-flex; gap: 5px; align-items: center; color: var(--oc-muted); font-size: 11px; }
+      .diag-page { display: flex; gap: 8px; align-items: center; margin: 10px 0; }
+      .diag-page button { border: 1px solid var(--oc-border); background: var(--oc-layer); padding: 5px 9px; border-radius: 6px; }
+      .diag-page button:disabled { opacity: .5; cursor: default; }
+      .api-entry { margin: 8px 0; padding: 10px; background: var(--oc-layer); border: 1px solid var(--oc-border); border-radius: 8px; }
+      .api-entry strong { overflow-wrap: anywhere; font-size: 12px; }
+      .api-entry small { color: var(--oc-muted); font-variant-numeric: tabular-nums; }
+      .api-entry pre { margin-top: 8px; padding: 9px; border-radius: 6px; background: var(--oc-bg); border: 1px solid var(--oc-border); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; }
+      .api-entry button { border: 1px solid var(--oc-border); background: var(--oc-bg); border-radius: 6px; padding: 5px 9px; margin-top: 7px; }
       .diag-time { margin-left: auto; color: var(--oc-muted); font-variant-numeric: tabular-nums; font-size: 11px; }
       .diag-detail { margin-top: 5px; color: var(--oc-muted); overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
       .diag-raw-action { margin-top: 9px; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--oc-border); background: var(--oc-bg); color: var(--oc-fg); font-size: 12px; }
@@ -345,10 +356,38 @@
           <div class="diag-mode" role="group" aria-label="诊断展示模式">
             <button type="button" data-diag-mode="timeline" aria-pressed="true">时间线</button>
             <button type="button" data-diag-mode="linked" aria-pressed="false">关联视图</button>
+            <button type="button" data-diag-mode="history" aria-pressed="false">历史回溯</button>
+            <button type="button" data-diag-mode="browser" aria-pressed="false">浏览器 API</button>
           </div>
           <div class="diag-note diag-status" aria-live="polite">未开始捕获 · 等待手动开启</div>
           <div class="diag-note diag-link-hint" hidden>按用户消息 parentID 关联同一轮的多个模型响应和工具调用；缺少关联 ID 的事件会单独归组。仅使用当前页面开始捕获后的事件，不推测不存在的步骤。</div>
-          <div class="diag-records" role="log" aria-label="诊断事件列表"></div>
+          <div class="diag-subview diag-live" data-visible="true">
+            <div class="diag-records" role="log" aria-label="诊断事件列表"></div>
+          </div>
+          <div class="diag-subview diag-history" data-visible="false">
+            <div class="diag-note">手动读取 OpenCode 当前会话历史（每页 200 条，最多 50 页）。仅保留消息/工具事件摘要；原文仍需点击单条详情查看。不会重新执行工具。</div>
+            <div class="diag-controls">
+              <button class="diag-btn hist-load" type="button">加载完整会话</button>
+              <button class="diag-btn hist-cancel" type="button" disabled>停止加载</button>
+            </div>
+            <div class="diag-note hist-status">尚未加载</div>
+            <div class="diag-page">
+              <button type="button" class="hist-newer" disabled>← 较新</button>
+              <span class="diag-note hist-page">—</span>
+              <button type="button" class="hist-older" disabled>较旧 →</button>
+            </div>
+            <div class="hist-records"></div>
+          </div>
+          <div class="diag-subview diag-browser" data-visible="false">
+            <div class="diag-note">仅捕获当前页面 → 本地 OpenCode 的 fetch / XMLHttpRequest。不会看到 OpenCode 后端 → 模型提供商、Playwright 或 CTF 靶机的独立请求。</div>
+            <div class="diag-controls">
+              <button class="diag-btn api-capture" type="button" aria-pressed="false">开始监控 API</button>
+              <button class="diag-btn api-clear" type="button">清空</button>
+              <label><input type="checkbox" class="api-body-opt"> 同时采集请求/响应正文（敏感，最多各 16 KB）</label>
+            </div>
+            <div class="diag-note api-status">未开始。默认只记录方法、脱敏路径、状态、耗时。</div>
+            <div class="api-records"></div>
+          </div>
           <div class="foot">脱敏日志导出不包含原始模型/工具详情。按需查看只读取当前会话的本地历史记录，不会重放命令或向靶机发请求。模型消息历史不等于真实供应商 HTTP 请求报文；工具记录也不一定包含真实的 HTTP/SSH 流量。</div>
         </div>
       </div>
@@ -392,12 +431,21 @@
   let diagnosticMode = 'timeline';
   for (const button of shadow.querySelectorAll('[data-diag-mode]')) {
     button.addEventListener('click', () => {
-      diagnosticMode = button.dataset.diagMode === 'linked' ? 'linked' : 'timeline';
+      diagnosticMode = ['linked','history','browser'].includes(button.dataset.diagMode)
+        ? button.dataset.diagMode : 'timeline';
       for (const item of shadow.querySelectorAll('[data-diag-mode]'))
         item.setAttribute('aria-pressed',String(item.dataset.diagMode===diagnosticMode));
       diagLinkedHint.hidden = diagnosticMode !== 'linked';
       diagnostic.rawLock = false;
-      renderDiagnostic(true);
+      for (const view of shadow.querySelectorAll('.diag-subview')) {
+        view.dataset.visible = String(
+          (diagnosticMode === 'history' ? view.classList.contains('diag-history') :
+           diagnosticMode === 'browser' ? view.classList.contains('diag-browser') :
+           view.classList.contains('diag-live')));
+      }
+      if (diagnosticMode==='history') renderHistory();
+      if (diagnosticMode==='browser') renderBrowserRequests();
+      if (diagnosticMode==='linked'||diagnosticMode==='timeline') renderDiagnostic(true);
     });
   }
   let activeView = 'usage';
@@ -414,8 +462,11 @@
     }
     // Perf and its SSE state are initialized later in script startup.
     // Rendering diagnostics before that point would hit perf's TDZ.
-    if (activeView === 'diagnostics') renderDiagnostic(true);
-    else diagRecords.replaceChildren();
+    if (activeView === 'diagnostics') {
+      if (diagnosticMode==='history') renderHistory();
+      else if (diagnosticMode==='browser') renderBrowserRequests();
+      else renderDiagnostic(true);
+    } else diagRecords.replaceChildren();
   }
   for (const tab of shadow.querySelectorAll('.view-tab')) {
     tab.addEventListener('click', () => setView(tab.dataset.view));
@@ -1544,7 +1595,9 @@
       diagnostic.seen.clear();
       diagnostic.messageParents.clear();
       diagnostic.rawLock=false;
-      if (activeView === 'diagnostics') renderDiagnostic(true);
+      if (activeView === 'diagnostics' && diagnosticMode!=='browser' && diagnosticMode!=='history') renderDiagnostic(true);
+      resetHistory();
+      stopBrowserCapture();
       state.session = id;
       state.generation++;
       resetView();
