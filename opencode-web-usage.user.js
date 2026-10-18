@@ -383,8 +383,7 @@
       tab.setAttribute('aria-selected', String(selected));
       tab.tabIndex = selected ? 0 : -1;
     }
-    if (activeView === 'diagnostics') renderDiagnostic(true);
-    else renderDiagnostic(true);
+    renderDiagnostic(true);
   }
   for (const tab of shadow.querySelectorAll('.view-tab')) {
     tab.addEventListener('click', () => setView(tab.dataset.view));
