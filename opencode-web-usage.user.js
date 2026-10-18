@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode Web 原生侧栏使用量
 // @namespace    https://github.com/Tea1me/local_opencode_web_usage
-// @version      0.5.0
-// @description  原生同栏使用量：增加 TPS、TPM、TTFT 实时观测
+// @version      0.6.0
+// @description  修复 OpenCode 1.19.x 性能采集，补充 SSE 与消息轮询回退
 // @author       Tea1me & ChatGPT
 // @match        http://127.0.0.1:4096/*
 // @match        http://localhost:4096/*
@@ -240,7 +240,7 @@
             <span class="label">输出</span><span class="value" data-value="output">—</span>
             <span class="label">推理</span><span class="value" data-value="reasoning">—</span>
             <span class="label">缓存读取</span><span class="value" data-value="read">—</span>
-            <span class="label">缓存写入</span><span class="value" data-value="write">—</span>
+            <span class="label" title="服务商上报的缓存创建 Token；隐式缓存可不单独上报写入量">缓存创建（上报）</span><span class="value" data-value="write" title="0 仅说明未上报缓存创建量，不表示缓存复用无效">—</span>
           </div>
           <div class="track" title="各类 Token 比例">
             <span class="seg input" data-seg="input"></span>
@@ -256,21 +256,21 @@
             <span><i class="dot cache"></i>缓存读</span>
             <span><i class="dot write"></i>缓存写</span>
           </div>
-          <div class="subhead">实时性能 · 仅当前页面观测</div>
+          <div class="subhead">性能监测 · 1.x/2.x 兼容</div>
           <div class="perf-grid">
             <div class="perf-tile"><small>最近 TPS</small><strong data-perf="tps">—</strong></div>
             <div class="perf-tile"><small>60 秒 TPM</small><strong data-perf="tpm">—</strong></div>
             <div class="perf-tile"><small>最近 TTFT</small><strong data-perf="ttft">—</strong></div>
           </div>
-          <div class="perf-status" data-perf-status aria-live="polite">正在连接原生实时事件…</div>
+          <div class="perf-status" data-perf-status aria-live="polite">正在检查可用的数据接口…</div>
           <div class="subhead">会话详情</div>
           <div class="rows">
-            <span class="label">缓存读取占比</span><span class="value" data-value="hitRate">—</span>
+            <span class="label" title="缓存读取 Token /（缓存读取 + 未缓存输入）；不是请求级命中率">输入缓存复用占比</span><span class="value" data-value="hitRate">—</span>
             <span class="label">当前/最近模型</span><span class="value" data-value="model">—</span>
             <span class="label">助手消息数</span><span class="value" data-value="messages">—</span>
           </div>
           <div class="foot">当前会话累计统计 · 每 10 秒刷新<br>
-            费用以 OpenCode API 记录为准；累计 Token 不等于上下文窗口占用。
+            费用以 OpenCode API 记录为准；累计 Token 不等于上下文窗口占用。缓存读写是模型服务商上报的累计 Token，不是本地磁盘缓存容量；隐式缓存可能读取很高但创建一直为 0。
             与 TUI 的 opencode-tokenwatch 性能数据独立。</div>
         </div>
       </div>
@@ -458,12 +458,12 @@
     return sum;
   }
   function resetView() {
-    resetPerformance();
+    clearPerf();
     Object.values(values).forEach((item) => { item.textContent = '—'; });
     Object.values(segments).forEach((item) => { item.style.width = '0%'; });
   }
   function showStats(stats) {
-    const cacheDenominator = stats.input + stats.read + stats.write;
+    const cacheDenominator = stats.input + stats.read;
     const rendered = {
       ...stats,
       total: format(stats.total),
