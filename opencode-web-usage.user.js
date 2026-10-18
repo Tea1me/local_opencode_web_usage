@@ -6,6 +6,8 @@
 // @author       Tea1me & ChatGPT
 // @match        http://127.0.0.1:4096/*
 // @match        http://localhost:4096/*
+// @updateURL    https://raw.githubusercontent.com/Tea1me/local_opencode_web_usage/Tea1me/tea1me.github.io/opencode-web-usage.user.js
+// @downloadURL  https://raw.githubusercontent.com/Tea1me/local_opencode_web_usage/Tea1me/tea1me.github.io/opencode-web-usage.user.js
 // @run-at       document-idle
 // @noframes
 // @grant        none
@@ -109,7 +111,7 @@
         display: flex; margin-top: 12px; }
       .seg { min-width: 0; transition: width 180ms ease; height: 100%; }
       .input { background: #54a4ff; } .output { background: #65c9ae; }
-      .reasoning { background: #ceabff; } .cache { background: #f0ba63; }
+      .reasoning { background: #ceabff; } .cache { background: #f0ba63; } .write { background: #ef8ba5; }
       .legend { display: flex; flex-wrap: wrap; gap: 6px 10px; color: var(--oc-muted);
         font-size: 10px; margin-top: 9px; }
       .dot { display: inline-block; height: 7px; width: 7px; border-radius: 2px;
@@ -173,12 +175,14 @@
             <span class="seg output" data-seg="output"></span>
             <span class="seg reasoning" data-seg="reasoning"></span>
             <span class="seg cache" data-seg="read"></span>
+            <span class="seg write" data-seg="write"></span>
           </div>
           <div class="legend">
             <span><i class="dot input"></i>输入</span>
             <span><i class="dot output"></i>输出</span>
             <span><i class="dot reasoning"></i>推理</span>
             <span><i class="dot cache"></i>缓存读</span>
+            <span><i class="dot write"></i>缓存写</span>
           </div>
           <div class="subhead">会话详情</div>
           <div class="rows">
@@ -331,7 +335,7 @@
       messages: stats.messages == null ? '—（会话汇总）' : format(stats.messages),
     };
     for (const [key, element] of Object.entries(values)) element.textContent = String(rendered[key] ?? '—');
-    const total = stats.input + stats.output + stats.reasoning + stats.read;
+    const total = stats.total;
     for (const [key, element] of Object.entries(segments)) {
       element.style.width = total > 0 ? (number(stats[key]) / total * 100).toFixed(3) + '%' : '0%';
     }
@@ -354,8 +358,10 @@
       status.textContent = '读取失败：' + (error?.message || String(error));
       resetView();
     } finally {
+      const switched = state.generation !== generation;
       state.pending = false;
       refreshBtn.disabled = false;
+      if (switched && state.session && state.open) void refresh(true);
     }
   }
 
