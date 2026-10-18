@@ -298,7 +298,7 @@
     nativeTab.setAttribute('aria-pressed', String(state.open));
     writeStore(CONFIG.openKey, state.open);
     syncPlacement();
-    if (state.open && state.session) void refresh(true);
+    if (state.open && state.session) { void refresh(true); void pollMessages(); }
   }
 
   nativeTab.addEventListener('click', () => setOpen(!state.open));
@@ -509,148 +509,233 @@
   }
 
 
-  // V2 /api/event broadcasts live server events. The server's session summary
-  // does not contain these timing metrics, so only measurements seen while this
-  // browser is observing the stream are considered authoritative.
-  const performance = {
-    sessionID: null,
-    attempts: new Map(),
-    completed: new Map(),
-    latest: null,
-    source: '连接中',
-    connected: false,
-    seenAny: false,
+
+  // 1.x emits message.* events on /global/event and /event.
+  // 2.x emits session.step.* on /api/event. Bounded polling of V1 messages
+  // provides a fallback when the SSE endpoint/delta stream is unavailable.
+  const perf = {
+    session: null, attempts: new Map(), completed: new Map(), latest: null,
+    pollReady: false, polling: false, pollStatus: '尚未查询',
+    sseConnected: false, sseStatus: '检查接口中', drops: 0,
   };
-  let stream = null;
-
-  function resetPerformance() {
-    performance.sessionID = state.session;
-    performance.attempts.clear();
-    performance.completed.clear();
-    performance.latest = null;
-    renderPerformance();
-  }
-
-  function timeMs(value) {
-    const ms = typeof value === 'number' ? value :
-      (typeof value === 'string' ? Date.parse(value) : NaN);
-    return Number.isFinite(ms) && ms > 0 ? ms : null;
-  }
-
-  function tokenTotal(tokens) {
-    const t = tokens || {};
+  const eventPaths = ['/global/event', '/event', '/api/event'];
+  let eventSource = null;
+  let candidateIndex = 0;
+  let retryTimer = null;
+  const epoch = (value) => {
+    const n = typeof value === 'number' ? value :
+      typeof value === 'string' ? Date.parse(value) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  function countTokens(t) {
+    if (!t) return 0;
     return number(t.input) + number(t.output) + number(t.reasoning) +
       number(t.cache?.read) + number(t.cache?.write);
   }
-
+  function clearPerf() {
+    perf.session = state.session;
+    perf.attempts.clear();
+    perf.completed.clear();
+    perf.latest = null;
+    perf.pollReady = false;
+    perf.pollStatus = '待同步消息';
+    renderPerformance();
+  }
+  function storeMetric(key, m) {
+    if (!key || !m || !Number.isFinite(m.time)) return;
+    if (m.total > 0) perf.completed.set(key, m);
+    if ((m.tps !== null && m.tps !== undefined ||
+         m.ttft !== null && m.ttft !== undefined) &&
+        (!perf.latest || m.time >= perf.latest.time))
+      perf.latest = m;
+  }
   function renderPerformance() {
     const now = Date.now();
-    const ttl = now - 60000;
-    for (const [key, record] of performance.completed) {
-      if (record.time < ttl) performance.completed.delete(key);
+    for (const [id, value] of perf.completed) {
+      if (value.time < now - 60000) perf.completed.delete(id);
     }
-    const recent = [...performance.completed.values()];
-    const tpm = recent.reduce((total, record) => total + record.tokens, 0);
-    perfValues.tps.textContent = performance.latest?.tps == null
-      ? '—' : performance.latest.tps.toFixed(1) + ' tok/s';
-    perfValues.ttft.textContent = performance.latest?.ttft == null
-      ? '—' : format(performance.latest.ttft) + ' ms';
-    perfValues.tpm.textContent = performance.connected && performance.seenAny
-      ? format(tpm) : '—';
-    const stateInfo = performance.connected ? '已连接 /api/event' : performance.source;
-    perfStatus.textContent = stateInfo +
-      ' · 当前页观测窗口；重载后不补算历史' +
-      (performance.latest ? ' · 最近有效请求' : ' · 等待下一次生成');
+    for (const [id, value] of perf.attempts) {
+      if (value.start && now - value.start > 180000) perf.attempts.delete(id);
+    }
+    perfValues.tps.textContent = perf.latest?.tps == null
+      ? '—' : perf.latest.tps.toFixed(1) + ' tok/s';
+    perfValues.ttft.textContent = perf.latest?.ttft == null
+      ? '—' : Math.round(perf.latest.ttft) + ' ms';
+    perfValues.tpm.textContent = perf.pollReady || perf.completed.size
+      ? format([...perf.completed.values()].reduce((x, row) => x + row.total, 0))
+      : '—';
+    perfStatus.textContent =
+      '事件：' + perf.sseStatus + '；消息：' + perf.pollStatus +
+      (perf.latest ? '；来源：' + perf.latest.source : '') +
+      '。TPM 为近 60 秒已完成请求累计用量，非服务商配额。' +
+      'TPS/TTFT 缺少首输出时间时显示 —。';
   }
 
-  function handlePerfEvent(event) {
-    if (!event || !event.type || !event.data ||
-      event.data.sessionID !== currentSession() || !state.session) return;
-    performance.seenAny = true;
-    const data = event.data;
-    const id = data.assistantMessageID;
-    if (!id || typeof id !== 'string') return;
-    const created = timeMs(event.created) ?? Date.now();
+  function markFirst(id, ts) {
+    if (!id || !ts) return;
+    const p = perf.attempts.get(id) || { start: null, first: null };
+    if (p.first === null || p.first === undefined || ts < p.first) p.first = ts;
+    perf.attempts.set(id, p);
+  }
+  function collectMessage(info, parts = []) {
+    if (info?.role !== 'assistant' || !info.id) return;
+    const start = epoch(info.time?.created);
+    const end = epoch(info.time?.completed);
+    const pending = perf.attempts.get(info.id) || { start: null, first: null };
+    if (start) pending.start = start;
+    if (start && !end) perf.attempts.set(info.id, pending);
+    if (!start || !end || end < start) return;
+    const candidates = (Array.isArray(parts) ? parts : [])
+      .filter(p => (p?.type === 'text' || p?.type === 'reasoning') &&
+        typeof p.text === 'string' && p.text.trim())
+      .map(p => epoch(p.time?.start))
+      .filter(t => t !== null && t >= start && t <= end);
+    const fromParts = candidates.length > 0;
+    const first = fromParts ? Math.min(...candidates) :
+      (pending.first && pending.first >= start && pending.first <= end
+        ? pending.first : null);
+    const secs = first == null ? 0 : (end - first) / 1000;
+    const output = number(info.tokens?.output);
+    storeMetric(info.id, {
+      time: end, total: countTokens(info.tokens),
+      tps: secs > 0 && output > 0 ? output / secs : null,
+      ttft: first == null ? null : first - start,
+      source: fromParts ? 'V1 part 首输出时间（近似）' :
+        first !== null ? 'V1 SSE 首输出（近似）' : 'V1 消息记录',
+    });
+    perf.attempts.delete(info.id);
+  }
 
-    // A single assistant step is one provider request, including tool steps.
-    if (event.type === 'session.step.started') {
-      const started = timeMs(data.started) ?? created;
-      performance.attempts.set(id, { started, first: null, streamed: null });
-    } else if (event.type === 'session.text.delta' ||
-               event.type === 'session.reasoning.delta') {
-      // Started events may be placeholders. Only a nonempty delta is first output.
-      if (typeof data.delta !== 'string' || !data.delta.trim()) return;
-      const attempt = performance.attempts.get(id);
-      if (attempt && attempt.first == null) attempt.first = created;
-    } else if (event.type === 'session.step.streamed') {
-      const attempt = performance.attempts.get(id);
-      if (attempt) attempt.streamed = created;
-    } else if (event.type === 'session.step.ended') {
-      const attempt = performance.attempts.get(id);
-      performance.attempts.delete(id);
-      if (!data.tokens || !attempt) {
-        renderPerformance();
-        return;
+  function receivePerfEvent(raw) {
+    const e = raw?.payload?.type ? raw.payload : raw;
+    if (!e || typeof e.type !== 'string') return;
+    const d = e.data ?? e.properties ?? {};
+    const id = d.sessionID ?? d.info?.sessionID ?? d.part?.sessionID;
+    if (!id || !state.session || id !== state.session || id !== currentSession()) return;
+    const msgID = d.assistantMessageID ?? d.info?.id ?? d.part?.messageID ?? d.messageID;
+    const time = epoch(e.created) ?? Date.now();
+    if (e.type === 'message.updated') {
+      collectMessage(d.info);
+    } else if (e.type === 'message.part.updated') {
+      const p = d.part;
+      if ((p?.type === 'text' || p?.type === 'reasoning') &&
+          typeof p.text === 'string' && p.text.trim())
+        markFirst(p.messageID, epoch(p.time?.start) ?? time);
+    } else if (e.type === 'message.part.delta') {
+      if (typeof d.delta === 'string' && d.delta.trim() &&
+        (d.field === 'text' || d.field === undefined))
+        markFirst(d.messageID, time);
+    } else if (e.type === 'session.step.started') {
+      perf.attempts.set(msgID, { start: epoch(d.started) ?? time, first: null, streamed: null });
+    } else if (e.type === 'session.text.delta' || e.type === 'session.reasoning.delta') {
+      if (typeof d.delta === 'string' && d.delta.trim()) markFirst(msgID, time);
+    } else if (e.type === 'session.step.streamed') {
+      const p = perf.attempts.get(msgID);
+      if (p) p.streamed = time;
+    } else if (e.type === 'session.step.ended') {
+      const p = perf.attempts.get(msgID);
+      perf.attempts.delete(msgID);
+      if (p?.start && d.tokens) {
+        const secs = p.streamed ? (p.streamed - p.start) / 1000 : 0;
+        const tps = secs > 0 && number(d.tokens.output) > 0
+          ? number(d.tokens.output) / secs : null;
+        const ttft = p.first != null && p.first >= p.start ? p.first - p.start : null;
+        storeMetric(msgID, {
+          time, total: countTokens(d.tokens), tps, ttft,
+          source: 'V2 实时事件（流式总耗时）',
+        });
       }
-      // "TPM" is the number of usage tokens recorded in the last 60s,
-      // NOT the provider's billing quota or live input rate.
-      performance.completed.set(id, { time: created, tokens: tokenTotal(data.tokens) });
-      const outputTokens = number(data.tokens.output);
-      const streamed = attempt.streamed;
-      const seconds = streamed == null ? null : (streamed - attempt.started) / 1000;
-      const tps = seconds > 0 && outputTokens > 0 ? outputTokens / seconds : null;
-      const ttft = attempt.first == null ? null : attempt.first - attempt.started;
-      if (tps != null || (ttft != null && ttft >= 0)) {
-        performance.latest = {
-          tps,
-          ttft: ttft != null && ttft >= 0 ? ttft : null,
-        };
-      }
-    } else if (event.type === 'session.step.failed') {
-      performance.attempts.delete(id);
-    } else {
-      return;
-    }
-    // Bound attempts in long-running sessions; events without a start are ignored.
-    if (performance.attempts.size > 100) {
-      const oldest = performance.attempts.keys().next().value;
-      performance.attempts.delete(oldest);
+    } else if (e.type === 'session.step.failed') {
+      perf.attempts.delete(msgID);
     }
     renderPerformance();
   }
 
   function connectPerformance() {
-    if (!('EventSource' in window) || stream) return;
+    if (eventSource || !('EventSource' in window)) return;
+    if (candidateIndex >= eventPaths.length) {
+      perf.sseStatus = '接口均不可用，稍后重试';
+      renderPerformance();
+      retryTimer = setTimeout(() => {
+        candidateIndex = 0;
+        retryTimer = null;
+        connectPerformance();
+      }, 60000);
+      return;
+    }
+    const url = eventPaths[candidateIndex];
+    perf.sseStatus = '探测 ' + url;
+    renderPerformance();
+    const source = new EventSource(url, { withCredentials: true });
+    eventSource = source;
+    let opened = false;
+    let moved = false;
+    let timeout = setTimeout(() => { if (!opened) next(); }, 6000);
+    function next() {
+      if (moved) return;
+      moved = true;
+      clearTimeout(timeout);
+      source.close();
+      if (eventSource === source) eventSource = null;
+      perf.sseConnected = false;
+      perf.attempts.clear();
+      if (!opened || ++perf.drops >= 3) {
+        candidateIndex++;
+        perf.drops = 0;
+      }
+      perf.sseStatus = '断开 ' + url + '，使用消息轮询';
+      renderPerformance();
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        connectPerformance();
+      }, opened ? 3000 : 350);
+    }
+    source.addEventListener('open', () => {
+      if (moved) return;
+      clearTimeout(timeout);
+      opened = true;
+      perf.sseConnected = true;
+      perf.sseStatus = '已连接 ' + url;
+      renderPerformance();
+    });
+    source.addEventListener('error', next);
+    const receiver = (e) => {
+      try { receivePerfEvent(JSON.parse(e.data)); } catch { /* ignore malformed event */ }
+    };
+    source.addEventListener('message', receiver);
+    for (const name of [
+      'message.updated', 'message.part.updated', 'message.part.delta',
+      'session.step.started', 'session.step.streamed', 'session.step.ended',
+      'session.step.failed', 'session.text.delta', 'session.reasoning.delta',
+    ]) source.addEventListener(name, receiver);
+  }
+
+  async function pollMessages() {
+    const id = state.session;
+    if (!id || !state.open || perf.polling || document.hidden) return;
+    perf.polling = true;
+    const gen = state.generation;
+    let error = '无兼容列表';
     try {
-      stream = new EventSource('/api/event', { withCredentials: true });
-      performance.source = '连接中';
-      stream.addEventListener('open', () => {
-        performance.connected = true;
-        performance.source = '已连接';
-        renderPerformance();
-      });
-      stream.addEventListener('error', () => {
-        performance.connected = false;
-        performance.source = '事件流断开，等待重新连接';
-        // Do not use stale timestamps after an SSE gap.
-        performance.attempts.clear();
-        renderPerformance();
-      });
-      const receive = (message) => {
-        let event;
-        try { event = JSON.parse(message.data); } catch { return; }
-        handlePerfEvent(event);
-      };
-      stream.addEventListener('message', receive);
-      // Some SSE implementations emit named events rather than default "message".
-      // Both variants are handled, without depending on OpenCode's app internals.
-      for (const name of [
-        'session.step.started', 'session.step.streamed',
-        'session.step.ended', 'session.step.failed',
-        'session.text.delta', 'session.reasoning.delta',
-      ]) stream.addEventListener(name, receive);
-    } catch {
-      performance.source = '此版本无法建立事件流';
+      for (const path of [
+        '/session/' + encodeURIComponent(id) + '/message?limit=80',
+        '/api/session/' + encodeURIComponent(id) + '/message?limit=80',
+      ]) {
+        try {
+          const payload = await jsonGET(path);
+          const rows = Array.isArray(payload) ? payload : payload?.data;
+          if (!Array.isArray(rows)) throw Error('未返回消息列表');
+          if (gen !== state.generation || id !== currentSession()) return;
+          perf.pollReady = true;
+          perf.pollStatus = '已同步最近 ' + rows.length + ' 条';
+          for (const item of rows) collectMessage(item?.info ?? item, item?.parts ?? item?.content ?? []);
+          return;
+        } catch (e) { error = e?.message || String(e); }
+      }
+      if (gen === state.generation && id === currentSession())
+        perf.pollStatus = '消息接口不可用（' + error + '）';
+    } finally {
+      perf.polling = false;
       renderPerformance();
     }
   }
@@ -662,6 +747,7 @@
       state.session = id;
       state.generation++;
       resetView();
+      void pollMessages();
       status.textContent = id ? '即将读取 ' + id : '请打开会话';
       if (id && state.open) void refresh(true);
     }
@@ -672,6 +758,7 @@
   connectPerformance();
   setInterval(syncRoute, CONFIG.routeCheckMs);
   setInterval(renderPerformance, 1000);
+  setInterval(() => void pollMessages(), CONFIG.refreshMs);
   setInterval(() => void refresh(), CONFIG.refreshMs);
   window.addEventListener('resize', syncPlacement);
   document.addEventListener('visibilitychange', () => {
