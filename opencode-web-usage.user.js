@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode Web 原生侧栏使用量
 // @namespace    https://github.com/Tea1me/local_opencode_web_usage
-// @version      0.8.1
-// @description  模型/工具执行诊断：脱敏事件时间线、工具耗时与错误分类，保留会话用量和推理折叠
+// @version      0.9.0
+// @description  新增按需查看 ToolPart 原始 input/output；脱敏诊断不变，保留用量与折叠
 // @author       Tea1me & ChatGPT
 // @match        http://127.0.0.1:4096/*
 // @match        http://localhost:4096/*
@@ -164,6 +164,10 @@
       .diag-record[data-kind="tool"] .diag-tag { color: var(--oc-accent); }
       .diag-time { margin-left: auto; color: var(--oc-muted); font-variant-numeric: tabular-nums; font-size: 11px; }
       .diag-detail { margin-top: 5px; color: var(--oc-muted); overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
+      .diag-raw-action { margin-top: 9px; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--oc-border); background: var(--oc-bg); color: var(--oc-fg); font-size: 12px; }
+      .diag-raw-action:hover { background: var(--oc-layer); }
+      .diag-raw-warning { margin-top: 8px; font-size: 11px; color: var(--oc-muted); line-height: 1.5; }
+      .diag-raw { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 6px; background: var(--oc-bg); border: 1px solid var(--oc-border); padding: 9px; font: 12px/1.55 ui-monospace,Consolas,monospace; margin: 7px 0 0; }
       .content {
         min-height: 0; flex: 1; overflow-y: auto;
         padding: 14px 16px 20px; scrollbar-width: thin;
@@ -315,7 +319,7 @@
         </div>
         <div class="content diag-content" hidden>
           <div class="subhead">模型事件 / 工具执行</div>
-          <div class="diag-note">只观察当前浏览器接收到的 OpenCode 事件；不拦截模型请求，也不读取工具命令、参数、输出或凭据。手动开始后才记录，刷新即清空。</div>
+          <div class="diag-note">只观察当前浏览器接收到的 OpenCode 事件。默认只记录脱敏元数据；点击特定工具的「按需查看原始详情」后，才从本地 API 读取该次调用的参数和结果。原始内容可能包含凭据，请勿随意转发。</div>
           <div class="diag-controls">
             <button class="diag-btn diag-capture" type="button" aria-pressed="false">开始捕获</button>
             <select class="diag-filter" aria-label="事件过滤">
@@ -329,7 +333,7 @@
           </div>
           <div class="diag-note diag-status" aria-live="polite">未开始捕获 · 等待手动开启</div>
           <div class="diag-records" role="log" aria-label="诊断事件列表"></div>
-          <div class="foot">范围：当前会话；仅事件类型、工具名称、状态、时长和错误类别。HTTP 状态码只在上游事件明确提供时才显示。工具内部访问 CTF 靶机的 HTTP/SSH 流量需要另外接入本地采集器。</div>
+          <div class="foot">脱敏日志导出不包含原始调用参数及工具输出。按需查看只读取当前会话的本地历史记录，不会额外发起靶机请求。该工具历史不一定包含真实的 HTTP/SSH 网络报文。</div>
         </div>
       </div>
     </div>
@@ -427,6 +431,11 @@
       kind: row.kind === 'error' ? 'error' : (row.category === 'tool' ? 'tool' : 'model'),
       title: row.title,
       detail: row.detail,
+      reference: row.reference && typeof row.reference.callID === 'string' &&
+        typeof row.reference.messageID === 'string'
+        ? {callID:row.reference.callID, messageID:row.reference.messageID,
+           partID:typeof row.reference.partID === 'string'?row.reference.partID:null}
+        : null,
     });
     if (diagnostic.rows.length > diagnostic.maxRows) diagnostic.rows.shift();
     if (activeView === 'diagnostics') renderDiagnostic();
@@ -524,8 +533,110 @@
       title:tool+' · '+phase,
       detail:source+duration+
         (status==='error'?' · '+errorCategory(part.state?.error):''),
-      key:'tool:'+key+':'+status});
+      key:'tool:'+key+':'+status,
+      reference: {callID:key, messageID:typeof part.messageID==='string'?part.messageID:'',
+        partID:typeof part.id==='string'?part.id:null}});
   }
+
+  // On-demand read, not capture. No raw tool input/output is added to
+  // diagnostic.rows or the sanitized JSON export.
+  function findStoredTool(payload, reference) {
+    const raw = payload?.data ?? payload;
+    const messages = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? [raw] : [];
+    for (const item of messages) {
+      const info = item?.info ?? item;
+      const parts = item?.parts ?? item?.content ?? info?.parts ?? info?.content ?? [];
+      if (!Array.isArray(parts)) continue;
+      for (const part of parts) {
+        if (part?.type !== 'tool') continue;
+        if (reference.messageID && part.messageID && part.messageID !== reference.messageID) continue;
+        if (part.callID === reference.callID ||
+            (reference.partID && part.id === reference.partID)) {
+          // Explicit allowlist: only fields that belong to this tool part.
+          return {
+            tool: part.tool ?? null,
+            callID:part.callID ?? null,
+            status: part.state?.status ?? null,
+            start:part.state?.time?.start ?? null,
+            end:part.state?.time?.end ?? null,
+            input:part.state?.input ?? null,
+            output:part.state?.output ?? null,
+            error:part.state?.error ?? null,
+            title:part.state?.title ?? null,
+            metadata:part.state?.metadata ?? null,
+            // The host may compact/truncate tool output before the next LLM call.
+            compacted:part.state?.time?.compacted ?? null,
+          };
+        }
+      }
+    }
+    return null;
+  }
+  async function loadStoredTool(reference, sessionID) {
+    if (!reference?.callID || !sessionID) throw Error('没有可以定位工具调用的标识');
+    const sid = encodeURIComponent(sessionID);
+    const mid = reference.messageID && encodeURIComponent(reference.messageID);
+    const paths = [
+      ...(mid ? [
+        '/session/'+sid+'/message/'+mid,
+        '/api/session/'+sid+'/message/'+mid,
+      ] : []),
+      '/session/'+sid+'/message?limit=100',
+      '/api/session/'+sid+'/message?limit=100',
+    ];
+    let found = false;
+    for (const path of paths) {
+      let payload;
+      try { payload = await jsonGET(path); } catch { continue; }
+      found = true;
+      const detail = findStoredTool(payload,reference);
+      if (detail) return detail;
+    }
+    throw Error(found ? '本次工具调用不在最近消息记录中，或该接口未返回 ToolPart' : '当前 OpenCode 未提供兼容的消息查询接口');
+  }
+
+  function attachRawToolButton(card,row) {
+    if (!row.reference?.callID || !row.reference?.messageID) return;
+    const button=document.createElement('button');
+    button.type='button';
+    button.className='diag-raw-action';
+    button.textContent='按需查看原始详情';
+    const panel=document.createElement('div');
+    panel.hidden=true;
+    const warning=document.createElement('div');
+    warning.className='diag-raw-warning';
+    warning.textContent='本地原始数据可能含 URL、Cookie、Token、密码和靶机响应。请检查敏感内容后再复制给 AI；此内容不进入「复制脱敏日志」。';
+    const pre=document.createElement('pre');
+    pre.className='diag-raw';
+    panel.append(warning,pre);
+    button.addEventListener('click',async()=>{
+      if (!panel.hidden) {
+        panel.hidden=true;pre.textContent='';
+        button.textContent='按需查看原始详情';
+        return;
+      }
+      const sessionID=state.session;
+      const generation=state.generation;
+      button.disabled=true;
+      button.textContent='正在读取本地 ToolPart…';
+      try {
+        const detail=await loadStoredTool(row.reference,sessionID);
+        if (sessionID!==state.session || generation!==state.generation || !card.isConnected) return;
+        const json=JSON.stringify(detail,null,2);
+        pre.textContent=json.length>150000 ? json.slice(0,150000)+
+          '\n\n[内容超过 150,000 字符，已截断界面显示；该内容可能仍包含敏感信息]' : json;
+        panel.hidden=false;
+        button.textContent='收起并清除原始详情';
+      } catch(e) {
+        if (sessionID!==state.session || generation!==state.generation || !card.isConnected) return;
+        pre.textContent='读取失败：'+(e?.message||'未知错误');
+        panel.hidden=false;
+        button.textContent='收起并清除原始详情';
+      } finally {button.disabled=false;}
+    });
+    card.append(button,panel);
+  }
+
   function renderDiagnostic() {
     diagCaptureButton.textContent = diagnostic.enabled ? '停止捕获' : '开始捕获';
     diagCaptureButton.setAttribute('aria-pressed',String(diagnostic.enabled));
@@ -556,7 +667,9 @@
       const timestamp=document.createElement('span');timestamp.className='diag-time';
       timestamp.textContent=new Date(row.at).toLocaleTimeString('zh-CN');
       const detail=document.createElement('div');detail.className='diag-detail';detail.textContent=row.detail;
-      head.append(title,timestamp);card.append(head,detail);fragment.appendChild(card);
+      head.append(title,timestamp);card.append(head,detail);
+      attachRawToolButton(card,row);
+      fragment.appendChild(card);
     }
     diagRecords.replaceChildren(fragment);
   }
