@@ -1,55 +1,43 @@
-# OpenCode Web Usage · 会话使用量
+# OpenCode Web Usage
 
-给本地 `opencode web` 添加会话 Token、缓存和费用统计。
+为本地 `opencode web` 增强当前会话 Token、缓存、费用与性能指标。
 
-**最新版 v0.4.0：显示在原生「审查 / 上下文」的同一个右侧面板里。** 不再独立占用一列。
+目前有两种实现，**不要同时启用**：
 
-> 技术说明：这仍是 **Tampermonkey 用户脚本**，不是编译进入 OpenCode 的官方 GUI 扩展。脚本在原生标签栏旁定位一个「▥ 使用量」按钮，并在选择它时将内容覆盖显示在原生面板的内容区域。**不会直接改动 Solid 管理的 Tab DOM**，避免旧版主界面空白问题。原生标签系统的拖拽排序、快捷键、持久化等行为并不适用于此模拟标签。
+| 实现 | 用途 | 安装方式 | 状态 |
+| --- | --- | --- | --- |
+| [油猴 v0.5.0](./opencode-web-usage.user.js) | 平时的 OpenCode Web，显示在「上下文」同栏 | Tampermonkey | JS 语法通过；当前版本待本机实测 |
+| [原生 GUI Panel 实验](./native-experiment/INTEGRATION.md) | 真正注册为 OpenCode 的 SideRegion 标签页 | 改动并构建 OpenCode 源码 | 实验源码，未编译实测 |
 
-## 安装 / 升级
+## 一、日常使用：Tampermonkey v0.5.0
 
-1. 安装浏览器扩展 [Tampermonkey](https://www.tampermonkey.net/)。
-2. 打开 [**脚本 Raw 安装地址**](https://raw.githubusercontent.com/Tea1me/local_opencode_web_usage/Tea1me/tea1me.github.io/opencode-web-usage.user.js)，安装或替换已有脚本。也可以复制完整内容到 Tampermonkey 编辑器，保存。
-3. 在油猴里确认版本是 **`@version 0.4.0`**，旧版「OpenCode Web 本地会话统计」以及 v0.2/v0.3 的重复副本都应禁用；确保同一网址只有一个脚本运行。
-4. 保持原本的启动命令：
-   ```bash
-   opencode web
-   ```
-5. 打开 `http://127.0.0.1:4096/`，进入会话，**先展开原生右侧「审查 / 上下文」面板**，然后点击与原生标签同一行的 `▥ 使用量`。
+1. 浏览器安装 [Tampermonkey](https://www.tampermonkey.net/)。
+2. [**安装/更新 .user.js（Raw）**](https://raw.githubusercontent.com/Tea1me/local_opencode_web_usage/Tea1me/tea1me.github.io/opencode-web-usage.user.js)。
+3. 在油猴编辑器中检查 `@version 0.5.0`；旧脚本只能保留一个启用。刷新原生 OpenCode Web（推荐 Ctrl+Shift+R）。
+4. 继续运行 `opencode web`，进入一个已有会话、展开「上下文」侧栏，在同一行切换到「▥ 使用量」。
 
-**注意：** 刷新网页不会自动替换 Tampermonkey 已安装的脚本版本；请在油猴里手动更新或重新安装，安装后再用 `Ctrl+Shift+R` 强制刷新网页。
+功能包括：
 
-## 功能
+- 直接读取 OpenCode 同源 API 的当前会话 Token（输入、输出、推理、缓存读写）、记录费用、模型与比例条。
+- **新增最近 TPS**：从 live V2 `session.step.started`、`session.step.streamed`、`session.step.ended` 得到流式起止时间和输出 Token，计算 `output / ((streamed - started) / 1000)`。它使用整个流式窗口，**包含首字等待**，与服务商内部纯解码速率不完全相同。
+- **新增最近 60 秒 TPM**：当前网页监听到的 `session.step.ended` 事件，在最近 60 秒内累计五类 Token。这里的 TPM 是**已记录用量的滑动时间窗**，不等于供应商的速率限制或剩余额度。
+- **新增最近 TTFT**：`session.step.started` 到第一个非空 `session.text.delta` 或 `session.reasoning.delta` 的时间差（毫秒）。仅收到请求开始和首输出两个可靠事件才显示。
+- 10 秒自动刷新普通统计；实时事件到达时更新性能统计，60 秒滚动窗口每秒重新计算。
+- 浏览器浅色/深色主题兼容；统计面板不移入 OpenCode Solid 管理的子节点。
 
-- 「▥ 使用量」跟随原生右侧面板的位置和尺寸；不再给主界面额外添加统计列。
-- 点击使用量显示统计，再点一次关闭；点击原生「上下文」「审查」等标签时切回原生内容。
-- 沿用已验证的会话统计 API：累计 Token、输入/输出/推理、缓存读取/写入、缓存读取占比、模型、记录费用（USD）和 Token 分类比例条。
-- 10 秒刷新，浏览器切换会话后同步，浅色/深色主题自动识别。
-- 数据直接从同源本地 OpenCode API 读取，不上传第三方服务器。
-- 脚本通过 `document.body` 独立挂载，只根据 `#review-panel` 的位置测量定位；不往 OpenCode 的 Solid 节点中添加子元素。
+**重要：** 三个性能指标的观测从当前页面连上 `/api/event` 后开始。已经结束的请求不会追算，页面关闭或刷新后重置；丢事件、重连期间也不伪造 TPS、TTFT。如果用量暂时显示 `—`，可以在该会话重新发送一条提示词来触发完整观测。
 
-## 兼容与局限
+> 旧版 v0.4.0 已在本地截图中验证可工作；v0.5.0 代码更新后，还需要在用户的 OpenCode 环境实测事件是否可用。若 `/api/event` 不兼容，本地 Token 总数等基础统计不受影响，性能区会显示无法连接/等待数据。
 
-- 只有原生 `#review-panel` **打开且可见**时，油猴使用量标签才会出现。
-- 这是与原生面板**同位置、同交互风格的用户脚本标签**，不是真正注册进 OpenCode GUI 扩展系统的 `Panel`。上游 UI DOM 结构变更后可能需要改脚本。
-- 窄窗口中原生标签栏空间不足时，新按钮可能与原有按钮距离较近或出现重叠，需要按具体 OpenCode 版本进一步适配。
-- 当前统计为**会话累计**，不代表上下文窗口实时使用量。
-- 费用以 OpenCode API 数据为准；返回 0 则显示 `$0.00000`，不会自行估价。
-- OpenCode V2 汇总 API 无法保证得到助手消息数，该项可能为「—（会话汇总）」。
-- 未接入 TUI 插件 `opencode-tokenwatch` 的 TTFT、TPS、P95 等性能日志。
+## 二、真正原生：GUI Panel 源码实验
 
-## 故障排查
+查看 [native-experiment/INTEGRATION.md](./native-experiment/INTEGRATION.md)。
 
-**仍看到额外的独立右侧列：** 说明运行的还是 v0.3.0 或旧脚本没有停用。检查 Tampermonkey 脚本版本。
+这个实验版本使用官方 `ctx.add(Panel, { region: "side" })`，由 OpenCode 自己管理 Tab，而不只是油猴浮层模拟。但当前 Web GUI 的 `ExtensionRoot` 只加载编译在 `@opencode/gui-extensions/renderer` 中的内置扩展，**现有安装版不能从用户配置直接加载这个 GUI 标签扩展**。需要把实验源码复制到官方项目并重新编译 Web GUI。
 
-**「使用量」标签未出现：** 确认处于已有会话，并且已打开「审查 / 上下文」原生右侧面板。脚本不在首页、侧栏关闭时显示标签。
+实验源码为了验证原生集成，从宿主内存态的消息历史计算基础统计和近似历史 TPS/TPM，TTFT 未接入；它与油猴 v0.5.0 功能覆盖尚不完全一致，也没有在源码构建环境做编译检查。
 
-**脚本无法读取数据：** 打开浏览器 DevTools → Network，查看 `/api/session/{id}` 或 `/session/{id}` 请求。
+## 相关仓库
 
-**使用非 4096 端口：** 修改脚本元信息的 `@match` 后保存。
-
-## 源码与相关项目
-
-- [油猴脚本源码](./opencode-web-usage.user.js)
-- [OpenCode 上游](https://github.com/anomalyco/opencode)
+- [OpenCode](https://github.com/anomalyco/opencode)
 - [opencode-tokenwatch](https://github.com/TTWK/opencode-tokenwatch)
