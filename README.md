@@ -4,14 +4,14 @@
 
 | 方案 | 状态 | 适合 |
 | --- | --- | --- |
-| [油猴 v0.10.0](./opencode-web-usage.user.js) | **推荐日常使用**；JS 语法已通过；1.19.x 实时指标已由用户截图验证，新增折叠功能待浏览器实测 | 已安装的 OpenCode 1.19.x、兼容新版本 |
+| [油猴 v0.11.0](./opencode-web-usage.user.js) | **推荐日常使用**；JS 语法已通过；1.19.x 实时指标已由用户截图验证，新增折叠功能待浏览器实测 | 已安装的 OpenCode 1.19.x、兼容新版本 |
 | [原生 Panel 实验](./native-experiment/INTEGRATION.md) | 需要编译 OpenCode 源码；未编译实测 | 想把标签真正注册到 GUI 扩展系统 |
 
 ## 安装 / 更新
 
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/)。
 2. 打开 [**油猴脚本 Raw 地址**](https://raw.githubusercontent.com/Tea1me/local_opencode_web_usage/Tea1me/tea1me.github.io/opencode-web-usage.user.js)，在油猴中更新或重新安装。
-3. 确认用户脚本顶部为 **`@version 0.10.0`**，不要同时启用旧脚本。之后用 Ctrl + Shift + R 刷新。
+3. 确认用户脚本顶部为 **`@version 0.11.0`**，不要同时启用旧脚本。之后用 Ctrl + Shift + R 刷新。
 4. 正常运行 `opencode web`，进入已有会话、打开右侧原生面板，再点击「▥ 使用量」。
 
 本脚本针对 `http://127.0.0.1:4096/` 和 `http://localhost:4096/`；其他端口需自行改 `@match`。
@@ -33,6 +33,26 @@
 仅当服务商把内容作为 `reasoning` 类型交给 OpenCode 时，才能折叠。若某些模型把“思考过程”直接写入常规 `text` 答案，而不是独立 reasoning part，脚本不会猜测并自动隐藏，否则容易错误折叠正常文本。
 
 折叠按钮由 CSS 伪元素模拟，**并非上游真正的原生 Accordion**。OpenCode 将来的 DOM 结构变更可能需要更新匹配方式。对响应本身、Token/TPS 统计没有影响。
+
+## v0.11.0：模型请求与工具执行关联视图
+
+进入「使用量 → 网络诊断」点击「开始捕获」，将展示模式由「时间线」切到 **「关联视图」**。
+
+- 基于 SSE `message.updated` 里的助手 `id / parentID`，把属于同一个用户消息（同一轮）的多个助手消息和各自 `message.part.updated` 工具调用归并成一个组。
+- 组内按捕获时间从早到晚显示「模型消息创建 → 工具执行中/完成 → 模型消息结束 → 后续模型消息」，保留每条的「查看模型消息详情」「按需查看原始详情」。
+- 每组显示时间范围、记录跨度、助手消息数（**只计该组有 ID 的可见事件，不冒充全会话消息数**）、不同工具调用数和异常数。
+- 未暴露足够 `messageID/parentID` 的 SSE 事件进入「未关联到消息的事件」组；**不会凭相近的时间戳虚构关联**。
+- 默认脱敏 JSON 导出、手动开始/停止、最多 200 条记录、切换会话自动停止并清空的行为不变。
+- 关联视图只重组**手动开始捕获后**接收到的记录，不补写过去未采集的 SSE 事件。用户可自行点单条原始详情读取历史消息。
+
+### 能拿到所有请求内容吗？
+
+要区分 **OpenCode 持久化的消息** 与 **真正发往模型供应商的 HTTP 报文**。
+
+- **可以按页读取会话已存储的所有消息**。在 OpenCode 1.19.2，`GET /api/session/{id}/message?limit=200&order=desc` 的每页最多 200 条，按 `cursor.next` 遍历；其中包含用户/助手消息及其类型化内容，但 OpenCode 可能按投影形式提供，原始工具输出可能已压缩/截断。旧版 `/session/{id}/message` 也可读取部分/全部记录。
+- **不能保证从会话 API 还原供应商 HTTP 的完整请求字节**。实际送出内容可能经过 system prompt 注入、上下文裁剪、消息格式适配、工具 schema 转换、provider/SDK 调整，且 Headers/API Key 和流式 wire body 不一定持久化。
+- 要获取真正完整的模型 API 请求与响应，必须对 `opencode web` **后端的 provider 调用链**增加显式、选择性、受保护的调试采集，或使后端走可控代理。浏览器 DevTools/油猴只能看到 Web→本地 OpenCode 的请求，无法直接截获后端→模型服务商的 HTTPS 数据。
+- **不要默认抓取请求/响应正文**：它们可能包含系统提示、API Key、Cookie、CTF Flag 或其他隐私信息。当前 v0.11.0 不提供一键导出全会话原始内容；此类操作应该单独显式开启并提供敏感内容警告。
 
 ## v0.10.0：模型消息创建/结束可展开
 
