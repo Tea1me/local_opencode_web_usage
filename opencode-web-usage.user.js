@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode Web 原生侧栏使用量
 // @namespace    https://github.com/Tea1me/local_opencode_web_usage
-// @version      0.7.1
-// @description  修复助手消息数统计（游标分页）；保留使用量、实时性能与推理折叠
+// @version      0.8.0
+// @description  模型/工具执行诊断：脱敏事件时间线、工具耗时与错误分类，保留会话用量和推理折叠
 // @author       Tea1me & ChatGPT
 // @match        http://127.0.0.1:4096/*
 // @match        http://localhost:4096/*
@@ -147,6 +147,23 @@
         width: 17px; height: 17px; stroke: currentColor; fill: none;
         stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
       }
+      .view-tabs { display: flex; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--oc-border); }
+      .view-tab { border: 1px solid transparent; background: transparent; border-radius: 6px; padding: 6px 13px; color: var(--oc-muted); }
+      .view-tab[aria-selected="true"] { background: var(--oc-layer); border-color: var(--oc-border); color: var(--oc-fg); font-weight: 650; }
+      .diag-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; align-items: center; }
+      .diag-btn { border-radius: 7px; border: 1px solid var(--oc-border); background: var(--oc-layer); padding: 6px 10px; }
+      .diag-btn[aria-pressed="true"] { background: var(--oc-accent); color: white; border-color: var(--oc-accent); }
+      .diag-btn:disabled { opacity: .5; cursor: not-allowed; }
+      .diag-filter { border: 1px solid var(--oc-border); background: var(--oc-bg); color: var(--oc-fg); border-radius: 6px; padding: 5px 8px; }
+      .diag-note { font-size: 11px; line-height: 1.6; color: var(--oc-muted); }
+      .diag-records { display: flex; flex-direction: column; gap: 8px; padding-top: 9px; }
+      .diag-record { border: 1px solid var(--oc-border); background: var(--oc-layer); border-radius: 8px; padding: 9px 11px; }
+      .diag-head { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+      .diag-tag { font-weight: 700; font-size: 12px; }
+      .diag-record[data-kind="error"] .diag-tag { color: #cd493d; }
+      .diag-record[data-kind="tool"] .diag-tag { color: var(--oc-accent); }
+      .diag-time { margin-left: auto; color: var(--oc-muted); font-variant-numeric: tabular-nums; font-size: 11px; }
+      .diag-detail { margin-top: 5px; color: var(--oc-muted); overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
       .content {
         min-height: 0; flex: 1; overflow-y: auto;
         padding: 14px 16px 20px; scrollbar-width: thin;
@@ -242,7 +259,11 @@
             <svg viewBox="0 0 24 24"><path d="M14 6l-6 6 6 6"/></svg>
           </button>
         </div>
-        <div class="content">
+        <div class="view-tabs" role="tablist" aria-label="面板内容">
+          <button type="button" role="tab" class="view-tab" data-view="usage" aria-selected="true">使用量</button>
+          <button type="button" role="tab" class="view-tab" data-view="diagnostics" aria-selected="false">网络诊断</button>
+        </div>
+        <div class="content stats-content">
           <div class="status" aria-live="polite">等待读取会话…</div>
           <div class="summary">
             <div class="tile"><small>累计 Token</small><strong data-value="total">—</strong></div>
@@ -293,6 +314,24 @@
             费用以 OpenCode API 记录为准；累计 Token 不等于上下文窗口占用。缓存读写是模型服务商上报的累计 Token，不是本地磁盘缓存容量；隐式缓存可能读取很高但创建一直为 0。
             与 TUI 的 opencode-tokenwatch 性能数据独立。</div>
         </div>
+        <div class="content diag-content" hidden>
+          <div class="subhead">模型事件 / 工具执行</div>
+          <div class="diag-note">只观察当前浏览器接收到的 OpenCode 事件；不拦截模型请求，也不读取工具命令、参数、输出或凭据。手动开始后才记录，刷新即清空。</div>
+          <div class="diag-controls">
+            <button class="diag-btn diag-capture" type="button" aria-pressed="false">开始捕获</button>
+            <select class="diag-filter" aria-label="事件过滤">
+              <option value="all">全部事件</option>
+              <option value="model">模型事件</option>
+              <option value="tool">工具执行</option>
+              <option value="error">异常/失败</option>
+            </select>
+            <button class="diag-btn diag-clear" type="button">清空</button>
+            <button class="diag-btn diag-copy" type="button">复制脱敏日志</button>
+          </div>
+          <div class="diag-note diag-status" aria-live="polite">未开始捕获 · 等待手动开启</div>
+          <div class="diag-records" role="log" aria-label="诊断事件列表"></div>
+          <div class="foot">范围：当前会话；仅事件类型、工具名称、状态、时长和错误类别。HTTP 状态码只在上游事件明确提供时才显示。工具内部访问 CTF 靶机的 HTTP/SSH 流量需要另外接入本地采集器。</div>
+        </div>
       </div>
     </div>
   `;
@@ -308,6 +347,259 @@
     .map((element) => [element.dataset.perf, element]));
   const perfStatus = node('[data-perf-status]');
 
+
+
+  // A page-local opt-in recorder. No raw SSE event or tool payload is saved.
+  // Only fixed labels, numeric values, and a strict-allowlisted tool name survive.
+  const diagnostic = {
+    enabled: false,
+    sessionID: null,
+    started: 0,
+    rows: [],
+    seen: new Set(),
+    maxRows: 200,
+    maxSeen: 800,
+  };
+  const diagPanel = node('.diag-content');
+  const usagePanel = node('.stats-content');
+  const diagStatus = node('.diag-status');
+  const diagRecords = node('.diag-records');
+  const diagCaptureButton = node('.diag-capture');
+  const diagFilter = node('.diag-filter');
+  const diagCopyButton = node('.diag-copy');
+  let activeView = 'usage';
+
+  function setView(next) {
+    activeView = next === 'diagnostics' ? 'diagnostics' : 'usage';
+    diagPanel.hidden = activeView !== 'diagnostics';
+    usagePanel.hidden = activeView !== 'usage';
+    for (const tab of shadow.querySelectorAll('.view-tab')) {
+      const selected = tab.dataset.view === activeView;
+      tab.setAttribute('aria-selected', String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+    }
+    if (activeView === 'diagnostics') renderDiagnostic();
+  }
+  for (const tab of shadow.querySelectorAll('.view-tab')) {
+    tab.addEventListener('click', () => setView(tab.dataset.view));
+  }
+
+  function toolName(value) {
+    return typeof value === 'string' && /^[a-zA-Z0-9_-]{1,48}$/.test(value)
+      ? value : '工具';
+  }
+  function statusCode(error) {
+    const raw = error?.statusCode ?? error?.status ??
+      error?.data?.statusCode ?? error?.data?.status;
+    const n = Number(raw);
+    return Number.isInteger(n) && n >= 100 && n <= 599 ? n : null;
+  }
+  function errorCategory(error) {
+    const status = statusCode(error);
+    if (status === 401 || status === 403) return '鉴权/权限失败 HTTP ' + status;
+    if (status === 429) return '模型限流 HTTP 429';
+    if (status >= 500) return '服务端错误 HTTP ' + status;
+    if (status >= 400) return '客户端错误 HTTP ' + status;
+    // Inspect text transiently, never persist/print it: may contain secrets.
+    const name = typeof error?.name === 'string' ? error.name.slice(0, 80) : '';
+    const msg = typeof error === 'string' ? error :
+      typeof error?.message === 'string' ? error.message : '';
+    const value = (name + ' ' + msg).slice(0, 2048);
+    if (/timeout|timed.?out|etimedout|aborterror/i.test(value)) return '超时/中断';
+    if (/econnreset|econnrefused|enotfound|network|fetch failed|dns|socket/i.test(value)) return '网络/连接错误';
+    if (/tls|certificate|ssl/i.test(value)) return 'TLS/证书错误';
+    if (/permission|denied|unauthorized|forbidden/i.test(value)) return '权限错误';
+    return '执行异常（细节已脱敏）';
+  }
+  function recordDiagnostic(row) {
+    if (!diagnostic.enabled || diagnostic.sessionID !== state.session ||
+        currentSession() !== state.session) return;
+    if (!row || row.at < diagnostic.started) return;
+    if (row.key && diagnostic.seen.has(row.key)) return;
+    if (row.key) {
+      diagnostic.seen.add(row.key);
+      if (diagnostic.seen.size > diagnostic.maxSeen) {
+        diagnostic.seen.delete(diagnostic.seen.values().next().value);
+      }
+    }
+    diagnostic.rows.push({
+      at: row.at,
+      category: row.category === 'tool' ? 'tool' : 'model',
+      kind: row.kind === 'error' ? 'error' : (row.category === 'tool' ? 'tool' : 'model'),
+      title: row.title,
+      detail: row.detail,
+    });
+    if (diagnostic.rows.length > diagnostic.maxRows) diagnostic.rows.shift();
+    if (activeView === 'diagnostics') renderDiagnostic();
+  }
+  function readEventForDiagnostics(raw) {
+    if (!diagnostic.enabled) return;
+    const e = raw?.payload?.type ? raw.payload : raw;
+    const d = e?.data ?? e?.properties ?? {};
+    const sessionID = d.sessionID ?? d.info?.sessionID ?? d.part?.sessionID;
+    if (!e?.type || sessionID !== diagnostic.sessionID ||
+        sessionID !== currentSession()) return;
+    const at = Date.now();
+    const eventType = e.type;
+    const message = d.info;
+    if (eventType === 'message.updated' && message?.role === 'assistant') {
+      if (message?.error) {
+        recordDiagnostic({at,category:'model',kind:'error',title:'模型响应失败',
+          detail:errorCategory(message.error),key:'model-error:'+message.id});
+      } else if (message?.time?.completed) {
+        const ms = Number(message.time.completed) - Number(message.time.created);
+        recordDiagnostic({at,category:'model',title:'模型响应结束',
+          detail:ms > 0 ? Math.round(ms)+' ms · 含工具/等待时间' : '完成',
+          key:'model-end:'+message.id});
+      } else {
+        recordDiagnostic({at,category:'model',title:'模型消息创建',
+          detail:'等待后续输出',key:'model-start:'+message.id});
+      }
+      return;
+    }
+    if (eventType === 'message.part.updated' && d.part?.type === 'tool') {
+      recordToolPart(d.part,at,'SSE');
+      return;
+    }
+    if (eventType === 'session.error') {
+      recordDiagnostic({at,category:'model',kind:'error',title:'会话异常',
+        detail:errorCategory(d.error),key:'session-error:'+at});
+      return;
+    }
+    if (eventType === 'session.step.started' || eventType === 'session.next.step.started') {
+      recordDiagnostic({at,category:'model',title:'模型请求开始',detail:'模型步骤已启动',
+        key:'model-step-start:'+(d.assistantMessageID||at)});
+      return;
+    }
+    if (eventType === 'session.step.ended' || eventType === 'session.next.step.ended') {
+      const tokens = d.tokens || {};
+      recordDiagnostic({at,category:'model',title:'模型请求结束',
+        detail:'输出 '+Math.max(0,Number(tokens.output)||0)+' tokens',
+        key:'model-step-end:'+(d.assistantMessageID||at)});
+      return;
+    }
+    if (eventType === 'session.step.failed' || eventType === 'session.next.step.failed') {
+      recordDiagnostic({at,category:'model',kind:'error',title:'模型请求失败',
+        detail:errorCategory(d.error),key:'model-step-failed:'+(d.assistantMessageID||at)});
+      return;
+    }
+    if (eventType === 'session.next.retried' || eventType === 'session.retry') {
+      recordDiagnostic({at,category:'model',title:'模型请求重试',
+        detail:'重试 #' + (Number.isInteger(Number(d.attempt)) ? Math.min(999,Math.max(0,Number(d.attempt))) : '?') +
+          ' · ' + errorCategory(d.error),
+        key:'model-retry:'+at});
+      return;
+    }
+    if (eventType === 'session.next.tool.called' ||
+        eventType === 'session.next.tool.success' ||
+        eventType === 'session.next.tool.failed') {
+      const phase = eventType.split('.').at(-1);
+      const name = toolName(d.tool ?? d.name);
+      recordDiagnostic({at,category:'tool',kind:phase==='failed'?'error':'tool',
+        title: name+' · '+({called:'启动',success:'完成',failed:'失败'}[phase]),
+        detail:phase==='failed'?errorCategory(d.error):'服务器工具事件',
+        key:'next-tool:'+String(d.callID||at)+':'+phase});
+      return;
+    }
+    if (eventType === 'session.next.shell.started' || eventType === 'session.next.shell.ended') {
+      const phase = eventType.endsWith('started')?'启动':'完成';
+      recordDiagnostic({at,category:'tool',title:'shell · '+phase,
+        detail:'仅监控 shell 生命周期，不记录命令/输出',
+        key:'next-shell:'+String(d.callID||at)+':'+phase});
+    }
+  }
+  function recordToolPart(part, now = Date.now(), source = 'SSE') {
+    if (!diagnostic.enabled || part?.type !== 'tool') return;
+    const status = part.state?.status;
+    if (!['running','completed','error'].includes(status)) return;
+    const key = part.callID || part.id;
+    if (typeof key !== 'string' || !key) return;
+    const start = Number(part.state?.time?.start);
+    const end = Number(part.state?.time?.end);
+    if (source === '消息轮询' && (!Number.isFinite(end) || end < diagnostic.started)) return;
+    const tool = toolName(part.tool);
+    const phase = status==='running'?'执行中':status==='error'?'执行失败':'已完成';
+    const duration = Number.isFinite(start) && Number.isFinite(end) && end >= start
+      ? ' · '+Math.round(end-start)+' ms' : '';
+    recordDiagnostic({at:now,category:'tool',kind:status==='error'?'error':'tool',
+      title:tool+' · '+phase,
+      detail:source+duration+
+        (status==='error'?' · '+errorCategory(part.state?.error):''),
+      key:'tool:'+key+':'+status});
+  }
+  function renderDiagnostic() {
+    diagCaptureButton.textContent = diagnostic.enabled ? '停止捕获' : '开始捕获';
+    diagCaptureButton.setAttribute('aria-pressed',String(diagnostic.enabled));
+    diagStatus.textContent =
+      (diagnostic.enabled ? '捕获中' : '已停止') +
+      ' · '+(diagnostic.rows.length)+' 条记录（上限 200）'+
+      ' · SSE: '+(perf?.sseStatus||'待连接')+
+      ' · 当前会话 · 不保存请求正文';
+    const selected = diagFilter.value;
+    const rows = diagnostic.rows.filter(row =>
+      selected==='all' || row.category===selected ||
+      (selected==='error' && row.kind==='error'));
+    // Rendering with textContent, never HTML; event payloads cannot inject markup.
+    const fragment = document.createDocumentFragment();
+    if (!rows.length) {
+      const empty=document.createElement('p');
+      empty.className='diag-note';
+      empty.textContent=diagnostic.enabled?'尚未捕获符合条件的事件，请发起一次模型/工具请求。':'点击「开始捕获」后，新事件将显示在这里。';
+      fragment.appendChild(empty);
+    }
+    for (const row of [...rows].reverse()) {
+      const card=document.createElement('article');
+      card.className='diag-record';
+      card.dataset.kind=row.kind;
+      const head=document.createElement('div');
+      head.className='diag-head';
+      const title=document.createElement('span');title.className='diag-tag';title.textContent=row.title;
+      const timestamp=document.createElement('span');timestamp.className='diag-time';
+      timestamp.textContent=new Date(row.at).toLocaleTimeString('zh-CN');
+      const detail=document.createElement('div');detail.className='diag-detail';detail.textContent=row.detail;
+      head.append(title,timestamp);card.append(head,detail);fragment.appendChild(card);
+    }
+    diagRecords.replaceChildren(fragment);
+  }
+  function stopDiagnostics() {
+    diagnostic.enabled=false;
+    diagnostic.sessionID=null;
+    renderDiagnostic();
+  }
+  diagCaptureButton.addEventListener('click',()=>{
+    if(diagnostic.enabled){stopDiagnostics();return;}
+    diagnostic.enabled=true;
+    diagnostic.sessionID=state.session;
+    diagnostic.started=Date.now();
+    diagnostic.rows=[];
+    diagnostic.seen.clear();
+    renderDiagnostic();
+  });
+  node('.diag-clear').addEventListener('click',()=>{
+    diagnostic.rows=[];
+    diagnostic.seen.clear();
+    renderDiagnostic();
+  });
+  diagFilter.addEventListener('change',renderDiagnostic);
+  diagCopyButton.addEventListener('click',async()=>{
+    const rows=diagnostic.rows.map(row=>({
+      time:new Date(row.at).toISOString(),
+      category:row.category,
+      kind:row.kind,
+      title:row.title,
+      detail:row.detail
+    }));
+    try {
+      await navigator.clipboard.writeText(JSON.stringify({
+        schema:'opencode-diagnostics-v1',note:'脱敏元数据；不含命令、请求正文、响应正文与认证头',events:rows
+      },null,2));
+      diagCopyButton.textContent='已复制';
+    } catch {
+      diagCopyButton.textContent='复制失败（浏览器权限）';
+    }
+    setTimeout(()=>{diagCopyButton.textContent='复制脱敏日志';},2200);
+  });
+  setView('usage');
 
   const nativeTab = node('.native-tab');
   let observedPanel = null;
@@ -964,13 +1256,22 @@
     });
     source.addEventListener('error', next);
     const receiver = (e) => {
-      try { receivePerfEvent(JSON.parse(e.data)); } catch { /* ignore malformed event */ }
+      try {
+        const value = JSON.parse(e.data);
+        readEventForDiagnostics(value);
+        receivePerfEvent(value);
+      } catch { /* ignore malformed event */ }
     };
     source.addEventListener('message', receiver);
     for (const name of [
       'message.updated', 'message.part.updated', 'message.part.delta',
       'session.step.started', 'session.step.streamed', 'session.step.ended',
       'session.step.failed', 'session.text.delta', 'session.reasoning.delta',
+      'session.error', 'session.retry', 'session.next.step.started',
+      'session.next.step.ended', 'session.next.step.failed',
+      'session.next.retried','session.next.tool.called',
+      'session.next.tool.success','session.next.tool.failed',
+      'session.next.shell.started','session.next.shell.ended',
     ]) source.addEventListener(name, receiver);
   }
 
@@ -992,7 +1293,12 @@
           if (gen !== state.generation || id !== currentSession()) return;
           perf.pollReady = true;
           perf.pollStatus = '已同步最近 ' + rows.length + ' 条';
-          for (const item of rows) collectMessage(item?.info ?? item, item?.parts ?? item?.content ?? []);
+          for (const item of rows) {
+            collectMessage(item?.info ?? item, item?.parts ?? item?.content ?? []);
+            if (diagnostic.enabled) {
+              for (const part of item?.parts || []) recordToolPart(part,Date.now(),'消息轮询');
+            }
+          }
           return;
         } catch (e) { error = e?.message || String(e); }
       }
@@ -1008,6 +1314,10 @@
     const id = currentSession();
     host.dataset.theme = detectTheme();
     if (id !== state.session) {
+      if (diagnostic.enabled) stopDiagnostics();
+      diagnostic.rows=[];
+      diagnostic.seen.clear();
+      if (activeView === 'diagnostics') renderDiagnostic();
       state.session = id;
       state.generation++;
       resetView();
