@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode Web 原生侧栏使用量
 // @namespace    https://github.com/Tea1me/local_opencode_web_usage
-// @version      0.8.0
+// @version      0.8.1
 // @description  模型/工具执行诊断：脱敏事件时间线、工具耗时与错误分类，保留会话用量和推理折叠
 // @author       Tea1me & ChatGPT
 // @match        http://127.0.0.1:4096/*
@@ -308,7 +308,6 @@
           <div class="rows">
             <span class="label" title="缓存读取 Token /（缓存读取 + 未缓存输入）；不是请求级命中率">输入缓存复用占比</span><span class="value" data-value="hitRate">—</span>
             <span class="label">当前/最近模型</span><span class="value" data-value="model">—</span>
-            <span class="label">助手消息数</span><span class="value" data-value="messages">—</span>
           </div>
           <div class="foot">当前会话累计统计 · 每 10 秒刷新<br>
             费用以 OpenCode API 记录为准；累计 Token 不等于上下文窗口占用。缓存读写是模型服务商上报的累计 Token，不是本地磁盘缓存容量；隐式缓存可能读取很高但创建一直为 0。
@@ -889,115 +888,6 @@
     Object.values(segments).forEach((item) => { item.style.width = '0%'; });
   }
 
-  // Session aggregate endpoints report usage without assistant-message count.
-  // Count actual assistant message objects using the 1.19.2 V2 cursor API.
-  // The summary stays fast: this task runs separately, caching results for 60s.
-  const assistantCounts = new Map();
-  const assistantCountJobs = new Map();
-  const COUNT_TTL_MS = 60000;
-  const COUNT_PAGE_LIMIT = 50; // 50 × 200 = max 10k records per scan
-
-  const isAssistantRecord = (item) =>
-    (item?.info?.role ?? item?.role ?? item?.type ?? item?.info?.type) === 'assistant';
-
-  function assistantCountLabel(entry) {
-    if (!entry) return '统计中…';
-    const count = format(entry.count);
-    if (entry.partial) return '≥' + count + '（超过统计上限）';
-    if (entry.source === 'legacy') return count + '（已读取）';
-    return count;
-  }
-
-  async function readAssistantCount(id, generation) {
-    const alive = () => state.generation === generation &&
-      state.session === id && currentSession() === id;
-    const encoded = encodeURIComponent(id);
-    const prefix = '/api/session/' + encoded + '/message';
-    const visited = new Set();
-    let cursor = null;
-    let count = 0;
-    let page = 0;
-    let v2Unavailable = false;
-
-    while (page < COUNT_PAGE_LIMIT) {
-      if (!alive()) return null;
-      const query = cursor
-        ? '?limit=200&cursor=' + encodeURIComponent(cursor)
-        : '?limit=200&order=desc';
-      let payload;
-      try {
-        payload = await jsonGET(prefix + query);
-      } catch (error) {
-        if (page > 0) throw new Error('V2 消息分页中断：' + error.message);
-        v2Unavailable = true;
-        break;
-      }
-      if (!Array.isArray(payload?.data) || !payload.cursor ||
-          typeof payload.cursor !== 'object') {
-        if (page > 0) throw new Error('V2 后续页数据格式异常');
-        v2Unavailable = true;
-        break;
-      }
-      count += payload.data.filter(isAssistantRecord).length;
-      page++;
-      const next = payload.cursor.next;
-      if (!next) return { count, partial: false, source: 'v2', at: Date.now() };
-      if (typeof next !== 'string' || visited.has(next)) {
-        throw new Error('消息分页游标异常');
-      }
-      visited.add(next);
-      cursor = next;
-    }
-    if (!v2Unavailable) {
-      return { count, partial: true, source: 'v2', at: Date.now() };
-    }
-
-    // Older /session API is not guaranteed to page; label this as "read"
-    // rather than claiming an exhaustive total if the server truncates it.
-    if (!alive()) return null;
-    const legacy = await jsonGET('/session/' + encoded + '/message?limit=10000');
-    const rows = Array.isArray(legacy) ? legacy : legacy?.data;
-    if (!Array.isArray(rows)) throw new Error('旧版消息接口格式异常');
-    return {
-      count: rows.filter(isAssistantRecord).length,
-      partial: rows.length >= 10000,
-      source: 'legacy', at: Date.now(),
-    };
-  }
-
-  async function updateAssistantCount(id, generation, force = false) {
-    if (!id || state.session !== id || state.generation !== generation) return;
-    const cached = assistantCounts.get(id);
-    if (!force && cached && Date.now() - cached.at < COUNT_TTL_MS) {
-      values.messages.textContent = assistantCountLabel(cached);
-      return;
-    }
-    if (!cached) values.messages.textContent = '统计中…';
-    let job = assistantCountJobs.get(id);
-    if (!job) {
-      job = readAssistantCount(id, generation);
-      assistantCountJobs.set(id, job);
-    }
-    try {
-      const entry = await job;
-      if (!entry) return;
-      assistantCounts.set(id, entry);
-      while (assistantCounts.size > 8) {
-        assistantCounts.delete(assistantCounts.keys().next().value);
-      }
-      if (state.session === id && state.generation === generation) {
-        values.messages.textContent = assistantCountLabel(entry);
-      }
-    } catch (error) {
-      if (state.session === id && state.generation === generation && !cached) {
-        values.messages.textContent = '—（消息接口不可用）';
-        values.messages.title = String(error?.message || error);
-      }
-    } finally {
-      if (assistantCountJobs.get(id) === job) assistantCountJobs.delete(id);
-    }
-  }
-
   function showStats(stats) {
     const cacheDenominator = stats.input + stats.read;
     const rendered = {
@@ -1011,9 +901,6 @@
       cost: dollar(stats.cost),
       hitRate: cacheDenominator ? (stats.read / cacheDenominator * 100).toFixed(1) + '%' : '—',
       model: [stats.provider, stats.model].filter(Boolean).join('/') || '—',
-      messages: stats.messages == null
-        ? assistantCountLabel(assistantCounts.get(state.session))
-        : format(stats.messages),
     };
     for (const [key, element] of Object.entries(values)) element.textContent = String(rendered[key] ?? '—');
     const total = stats.total;
@@ -1034,7 +921,6 @@
       const stats = await loadStats(id);
       if (state.generation !== generation || currentSession() !== id) return;
       showStats(stats);
-      if (stats.messages == null) void updateAssistantCount(id, generation, force);
     } catch (error) {
       if (state.generation !== generation || currentSession() !== id) return;
       status.textContent = '读取失败：' + (error?.message || String(error));
@@ -1241,6 +1127,7 @@
       }
       perf.sseStatus = '断开 ' + url + '，使用消息轮询';
       renderPerformance();
+      if (diagnostic.enabled && activeView === 'diagnostics') renderDiagnostic();
       retryTimer = setTimeout(() => {
         retryTimer = null;
         connectPerformance();
@@ -1248,11 +1135,13 @@
     }
     source.addEventListener('open', () => {
       if (moved) return;
+      if (diagnostic.enabled && activeView === 'diagnostics') renderDiagnostic();
       clearTimeout(timeout);
       opened = true;
       perf.sseConnected = true;
       perf.sseStatus = '已连接 ' + url;
       renderPerformance();
+      if (diagnostic.enabled && activeView === 'diagnostics') renderDiagnostic();
     });
     source.addEventListener('error', next);
     const receiver = (e) => {
