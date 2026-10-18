@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode Web 原生侧栏使用量
 // @namespace    https://github.com/Tea1me/local_opencode_web_usage
-// @version      0.6.1
-// @description  修复 OpenCode 1.19.x 性能采集，补充 SSE 与消息轮询回退
+// @version      0.7.0
+// @description  会话统计 + TPS/TPM/TTFT + OpenCode 1.19 推理内容逐段折叠
 // @author       Tea1me & ChatGPT
 // @match        http://127.0.0.1:4096/*
 // @match        http://localhost:4096/*
@@ -22,6 +22,7 @@
     routeCheckMs: 1200,
     openKey: 'oc-web-usage:native-tab-open:v2',
     widthKey: 'oc-web-usage:dock-width:v1',
+    thinkingKey: 'oc-web-usage:reasoning-default-collapsed:v1',
   };
   const number = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
   const format = (value) => new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 0 }).format(number(value));
@@ -44,6 +45,7 @@
     session: null,
     pending: false,
     generation: 0,
+    thinkingCollapsed: readStore(CONFIG.thinkingKey, 'true') === 'true',
   };
 
   // The Shadow DOM host is owned by <body>, outside Solid's reconciled subtree.
@@ -177,6 +179,18 @@
         font-variant-numeric: tabular-nums;
       }
       .perf-status { color: var(--oc-muted); font-size: 11px; line-height: 1.5; margin-top: 8px; }
+      .oc-thinking-toggle {
+        border-radius: 7px;
+        padding: 5px 10px;
+        border: 1px solid var(--oc-border);
+        background: var(--oc-layer);
+        font-size: 12px;
+        font-weight: 600;
+        flex-shrink: 0;
+      }
+      .oc-thinking-toggle:hover { filter: brightness(.96); }
+      .oc-thinking-toggle[aria-pressed="true"] { border-color: var(--oc-accent); color: var(--oc-accent); }
+      .oc-thinking-hint { color: var(--oc-muted); font-size: 11px; margin-top: 7px; line-height: 1.55; }
       .subhead {
         font-size: 11px; letter-spacing: .2px; color: var(--oc-muted);
         margin: 17px 0 10px; font-weight: 600;
@@ -263,6 +277,12 @@
             <div class="perf-tile"><small>最近 TTFT</small><strong data-perf="ttft">—</strong></div>
           </div>
           <div class="perf-status" data-perf-status aria-live="polite">正在检查可用的数据接口…</div>
+          <div class="subhead">思考内容</div>
+          <div class="rows">
+            <span class="label">默认折叠 reasoning</span>
+            <button type="button" class="oc-thinking-toggle" aria-label="切换思考内容默认折叠" aria-pressed="false">—</button>
+          </div>
+          <div class="oc-thinking-hint">仅对模型的 reasoning 类型生效。点击聊天中的「▸ 思考内容」可单独展开，再点标题收起。原生「显示推理摘要」需保持开启。</div>
           <div class="subhead">会话详情</div>
           <div class="rows">
             <span class="label" title="缓存读取 Token /（缓存读取 + 未缓存输入）；不是请求级命中率">输入缓存复用占比</span><span class="value" data-value="hitRate">—</span>
@@ -304,6 +324,116 @@
   nativeTab.addEventListener('click', () => setOpen(!state.open));
   node('.collapse').addEventListener('click', () => setOpen(false));
   node('.refresh').addEventListener('click', () => void refresh(true));
+
+
+  // v1.19.2 has an unambiguous [data-component="reasoning-part"] marker.
+  // CSS-only collapse inside that marker keeps text/tool rows and Solid's
+  // reconciled tree untouched. The separate local setting is not the native
+  // "Show reasoning summaries" switch, which controls whether the part exists.
+  const REASON_SELECTOR = '[data-component="reasoning-part"]';
+  const perPartThinking = new Map();
+  const thinkingToggle = node('.oc-thinking-toggle');
+  const thinkingStyle = document.createElement('style');
+  thinkingStyle.id = 'oc-web-usage-thinking-style';
+  thinkingStyle.textContent = `
+    ${REASON_SELECTOR}::before {
+      content: "▾ 思考内容 · 点击折叠";
+      display: block;
+      width: fit-content;
+      max-width: 100%;
+      padding: 5px 10px;
+      margin: 0 0 8px 0;
+      border-radius: 6px;
+      background: var(--v2-background-bg-layer-01, var(--background-stronger, #edf1f6));
+      color: var(--v2-text-text-muted, var(--text-weak, #5c6879));
+      font-size: 12px;
+      line-height: 22px;
+      font-weight: 550;
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    html[data-oc-reasoning-default="collapsed"] ${REASON_SELECTOR}:not([data-oc-reasoning-open="true"]) > *,
+    html[data-oc-reasoning-default="expanded"] ${REASON_SELECTOR}[data-oc-reasoning-open="false"] > * {
+      display: none !important;
+    }
+    html[data-oc-reasoning-default="collapsed"] ${REASON_SELECTOR}:not([data-oc-reasoning-open="true"])::before,
+    html[data-oc-reasoning-default="expanded"] ${REASON_SELECTOR}[data-oc-reasoning-open="false"]::before {
+      content: "▸ 思考内容已折叠 · 点击展开";
+      margin-bottom: 0;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      ${REASON_SELECTOR}::before { transition: none; }
+    }
+  `;
+  document.head.appendChild(thinkingStyle);
+
+  function thinkingKey(part) {
+    const id = part.getAttribute('data-timeline-part-id');
+    return id && currentSession() ? currentSession() + ':' + id : null;
+  }
+  function restoreThinkingPart(part) {
+    if (!(part instanceof HTMLElement)) return;
+    const key = thinkingKey(part);
+    if (!key || !perPartThinking.has(key)) return;
+    part.dataset.ocReasoningOpen = String(perPartThinking.get(key));
+  }
+  function scanNewThinking(node) {
+    if (!(node instanceof Element)) return;
+    if (node.matches(REASON_SELECTOR)) restoreThinkingPart(node);
+    for (const part of node.querySelectorAll(REASON_SELECTOR)) restoreThinkingPart(part);
+  }
+  const thinkingObserver = new MutationObserver((records) => {
+    for (const record of records) {
+      for (const node of record.addedNodes) {
+        if (node.nodeType === Node.ELEMENT_NODE) scanNewThinking(node);
+      }
+    }
+  });
+
+  function updateThinkingToggle() {
+    document.documentElement.dataset.ocReasoningDefault =
+      state.thinkingCollapsed ? 'collapsed' : 'expanded';
+    thinkingToggle.textContent = state.thinkingCollapsed ? '已开启' : '已关闭';
+    thinkingToggle.setAttribute('aria-pressed', String(state.thinkingCollapsed));
+    thinkingToggle.title = state.thinkingCollapsed
+      ? '新出现的思考内容默认折叠，单段可展开'
+      : '新出现的思考内容默认展开，单段可折叠';
+  }
+  thinkingToggle.addEventListener('click', () => {
+    state.thinkingCollapsed = !state.thinkingCollapsed;
+    writeStore(CONFIG.thinkingKey, state.thinkingCollapsed);
+    perPartThinking.clear();
+    document.querySelectorAll(REASON_SELECTOR + '[data-oc-reasoning-open]')
+      .forEach((part) => part.removeAttribute('data-oc-reasoning-open'));
+    updateThinkingToggle();
+  });
+  document.addEventListener('click', (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const part = target.closest(REASON_SELECTOR);
+    if (!(part instanceof HTMLElement) || !currentSession()) return;
+    const override = part.getAttribute('data-oc-reasoning-open');
+    const expanded = override === null ? !state.thinkingCollapsed : override === 'true';
+    if (expanded) {
+      // Expanded blocks should respond only to clicks on our pseudo-header:
+      // normal markdown selection, hyperlinks and code actions remain native.
+      const bounds = part.getBoundingClientRect();
+      if (event.clientY < bounds.top || event.clientY > bounds.top + 34) return;
+      if (target.closest('a, button, input, textarea, select, summary')) return;
+    }
+    const next = !expanded;
+    part.dataset.ocReasoningOpen = String(next);
+    const key = thinkingKey(part);
+    if (key) {
+      perPartThinking.set(key, next);
+      if (perPartThinking.size > 500) {
+        perPartThinking.delete(perPartThinking.keys().next().value);
+      }
+    }
+  }, true);
+  updateThinkingToggle();
+  thinkingObserver.observe(document.body, { childList: true, subtree: true });
 
   // Native side panels belong to the Solid extension host. Portals are anchored
   // by geometry only: we do not insert nodes into its tab list or content tree.
