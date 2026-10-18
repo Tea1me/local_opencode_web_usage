@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OpenCode Web 原生侧栏使用量
 // @namespace    https://github.com/Tea1me/local_opencode_web_usage
-// @version      0.9.0
-// @description  新增按需查看 ToolPart 原始 input/output；脱敏诊断不变，保留用量与折叠
+// @version      0.10.0
+// @description  支持按需查看模型消息和工具调用的原始会话记录；保持默认脱敏、不保存原始内容
 // @author       Tea1me & ChatGPT
 // @match        http://127.0.0.1:4096/*
 // @match        http://localhost:4096/*
@@ -319,7 +319,7 @@
         </div>
         <div class="content diag-content" hidden>
           <div class="subhead">模型事件 / 工具执行</div>
-          <div class="diag-note">只观察当前浏览器接收到的 OpenCode 事件。默认只记录脱敏元数据；点击特定工具的「按需查看原始详情」后，才从本地 API 读取该次调用的参数和结果。原始内容可能包含凭据，请勿随意转发。</div>
+          <div class="diag-note">只观察当前浏览器接收到的 OpenCode 事件。默认只记录脱敏元数据；点击模型或工具记录的详情按钮，才从本地 API 读取对应消息、响应 Part、参数或结果。原始内容可能包含提示词或凭据，请勿随意转发。</div>
           <div class="diag-controls">
             <button class="diag-btn diag-capture" type="button" aria-pressed="false">开始捕获</button>
             <select class="diag-filter" aria-label="事件过滤">
@@ -333,7 +333,7 @@
           </div>
           <div class="diag-note diag-status" aria-live="polite">未开始捕获 · 等待手动开启</div>
           <div class="diag-records" role="log" aria-label="诊断事件列表"></div>
-          <div class="foot">脱敏日志导出不包含原始调用参数及工具输出。按需查看只读取当前会话的本地历史记录，不会额外发起靶机请求。该工具历史不一定包含真实的 HTTP/SSH 网络报文。</div>
+          <div class="foot">脱敏日志导出不包含原始模型/工具详情。按需查看只读取当前会话的本地历史记录，不会重放命令或向靶机发请求。模型消息历史不等于真实供应商 HTTP 请求报文；工具记录也不一定包含真实的 HTTP/SSH 流量。</div>
         </div>
       </div>
     </div>
@@ -436,10 +436,14 @@
       kind: row.kind === 'error' ? 'error' : (row.category === 'tool' ? 'tool' : 'model'),
       title: row.title,
       detail: row.detail,
-      reference: row.reference && typeof row.reference.callID === 'string' &&
-        typeof row.reference.messageID === 'string'
-        ? {callID:row.reference.callID, messageID:row.reference.messageID,
-           partID:typeof row.reference.partID === 'string'?row.reference.partID:null}
+      reference: row.reference && typeof row.reference.messageID === 'string' &&
+        row.reference.messageID.length > 0 && row.reference.messageID.length <= 256 &&
+        (row.reference.kind === 'model' ||
+          (row.reference.kind === 'tool' && typeof row.reference.callID === 'string'))
+        ? {kind:row.reference.kind, messageID:row.reference.messageID,
+           callID:row.reference.kind === 'tool' ? row.reference.callID : null,
+           partID:row.reference.kind === 'tool' && typeof row.reference.partID === 'string'
+             ? row.reference.partID : null}
         : null,
     });
     if (diagnostic.rows.length > diagnostic.maxRows) diagnostic.rows.shift();
@@ -458,15 +462,18 @@
     if (eventType === 'message.updated' && message?.role === 'assistant') {
       if (message?.error) {
         recordDiagnostic({at,category:'model',kind:'error',title:'模型响应失败',
-          detail:errorCategory(message.error),key:'model-error:'+message.id});
+          detail:errorCategory(message.error),key:'model-error:'+message.id,
+          reference:{kind:'model',messageID:message.id}});
       } else if (message?.time?.completed) {
         const ms = Number(message.time.completed) - Number(message.time.created);
         recordDiagnostic({at,category:'model',title:'模型响应结束',
           detail:ms > 0 ? Math.round(ms)+' ms · 含工具/等待时间' : '完成',
-          key:'model-end:'+message.id});
+          key:'model-end:'+message.id,
+          reference:{kind:'model',messageID:message.id}});
       } else {
         recordDiagnostic({at,category:'model',title:'模型消息创建',
-          detail:'等待后续输出',key:'model-start:'+message.id});
+          detail:'等待后续输出',key:'model-start:'+message.id,
+          reference:{kind:'model',messageID:message.id}});
       }
       return;
     }
@@ -481,19 +488,22 @@
     }
     if (eventType === 'session.step.started' || eventType === 'session.next.step.started') {
       recordDiagnostic({at,category:'model',title:'模型请求开始',detail:'模型步骤已启动',
-        key:'model-step-start:'+(d.assistantMessageID||at)});
+        key:'model-step-start:'+(d.assistantMessageID||at),
+        reference:{kind:'model',messageID:d.assistantMessageID}});
       return;
     }
     if (eventType === 'session.step.ended' || eventType === 'session.next.step.ended') {
       const tokens = d.tokens || {};
       recordDiagnostic({at,category:'model',title:'模型请求结束',
         detail:'输出 '+Math.max(0,Number(tokens.output)||0)+' tokens',
-        key:'model-step-end:'+(d.assistantMessageID||at)});
+        key:'model-step-end:'+(d.assistantMessageID||at),
+        reference:{kind:'model',messageID:d.assistantMessageID}});
       return;
     }
     if (eventType === 'session.step.failed' || eventType === 'session.next.step.failed') {
       recordDiagnostic({at,category:'model',kind:'error',title:'模型请求失败',
-        detail:errorCategory(d.error),key:'model-step-failed:'+(d.assistantMessageID||at)});
+        detail:errorCategory(d.error),key:'model-step-failed:'+(d.assistantMessageID||at),
+        reference:{kind:'model',messageID:d.assistantMessageID}});
       return;
     }
     if (eventType === 'session.next.retried' || eventType === 'session.retry') {
@@ -539,7 +549,8 @@
       detail:source+duration+
         (status==='error'?' · '+errorCategory(part.state?.error):''),
       key:'tool:'+key+':'+status,
-      reference: {callID:key, messageID:typeof part.messageID==='string'?part.messageID:'',
+      reference: {kind:'tool',callID:key,
+        messageID:typeof part.messageID==='string'?part.messageID:'',
         partID:typeof part.id==='string'?part.id:null}});
   }
 
@@ -600,17 +611,97 @@
     throw Error(found ? '本次工具调用不在最近消息记录中，或该接口未返回 ToolPart' : '当前 OpenCode 未提供兼容的消息查询接口');
   }
 
+
+  // This is the OpenCode *stored message*, not the provider's literal HTTP
+  // request/response bytes. Fetch only after a deliberate user click.
+  function findStoredMessage(payload, messageID) {
+    const raw = payload?.data ?? payload;
+    const messages = Array.isArray(raw) ? raw : raw && typeof raw === 'object' ? [raw] : [];
+    for (const item of messages) {
+      const info = item?.info ?? item;
+      if (!info || (info.id !== messageID && item?.messageID !== messageID)) continue;
+      let parts = item?.parts ?? info?.parts ?? item?.content ?? info?.content ?? [];
+      if (!Array.isArray(parts)) parts = [];
+      return { info, parts };
+    }
+    return null;
+  }
+
+  async function fetchStoredMessage(sessionID, messageID) {
+    if (!sessionID || !messageID) throw Error('缺少会话或消息标识');
+    const sid = encodeURIComponent(sessionID);
+    const mid = encodeURIComponent(messageID);
+    const paths = [
+      '/session/'+sid+'/message/'+mid,
+      '/api/session/'+sid+'/message/'+mid,
+      '/session/'+sid+'/message?limit=100',
+      '/api/session/'+sid+'/message?limit=100',
+    ];
+    let hadResponse = false;
+    for (const path of paths) {
+      let payload;
+      try { payload = await jsonGET(path); } catch { continue; }
+      hadResponse = true;
+      const match = findStoredMessage(payload,messageID);
+      if (!match) continue;
+      if (match.info?.sessionID && match.info.sessionID !== sessionID) continue;
+      return match;
+    }
+    throw Error(hadResponse
+      ? '该消息未出现在可读取的历史记录中（可能已分页或被压缩）'
+      : '当前 OpenCode 未返回兼容的消息接口');
+  }
+
+  async function loadStoredModel(reference, sessionID) {
+    if (reference?.kind !== 'model' || !reference.messageID) {
+      throw Error('没有可以定位模型消息的标识');
+    }
+    const message = await fetchStoredMessage(sessionID,reference.messageID);
+    if (message.info.role !== 'assistant' && message.info.type !== 'assistant') {
+      throw Error('目标记录不是助手消息，已拒绝显示');
+    }
+    const parentID = typeof message.info.parentID === 'string' ? message.info.parentID : null;
+    let parent = null;
+    let parentStatus = parentID ? '未找到关联父消息' : '消息未提供 parentID';
+    if (parentID) {
+      try {
+        const candidate = await fetchStoredMessage(sessionID,parentID);
+        if (candidate.info.role === 'user' || candidate.info.type === 'user') {
+          parent = candidate;
+          parentStatus = '已读取关联用户消息';
+        } else {
+          parentStatus = '关联消息不是用户消息';
+        }
+      } catch {
+        parentStatus = '无法读取关联用户消息';
+      }
+    }
+    return {
+      type: 'OpenCode 本地存储的会话消息（不是供应商 HTTP 报文）',
+      caution: '不能据此还原完整 system prompt、上下文裁剪、供应商请求头或原始 wire payload',
+      messageID: reference.messageID,
+      assistant: message.info,
+      responseParts: message.parts,
+      relatedUserMessage: parent,
+      relatedUserMessageStatus: parentStatus,
+    };
+  }
+
   function attachRawToolButton(card,row) {
-    if (!row.reference?.callID || !row.reference?.messageID) return;
+    if (!row.reference?.messageID ||
+        (row.reference.kind !== 'model' && row.reference.kind !== 'tool')) return;
+    if (row.reference.kind === 'tool' && !row.reference.callID) return;
     const button=document.createElement('button');
     button.type='button';
     button.className='diag-raw-action';
-    button.textContent='按需查看原始详情';
+    button.textContent=row.reference.kind === 'model' ? '查看模型消息详情' : '按需查看原始详情';
     const panel=document.createElement('div');
     panel.hidden=true;
     const warning=document.createElement('div');
     warning.className='diag-raw-warning';
-    warning.textContent='本地原始数据可能含 URL、Cookie、Token、密码和靶机响应。请检查敏感内容后再复制给 AI；此内容不进入「复制脱敏日志」。';
+    warning.textContent=row.reference.kind==='model'
+      ? '以下是 OpenCode 本地存储的助手消息、响应 Part 与可能关联的用户消息，不是供应商完整 HTTP 请求/响应。可能包含提示词、推理、密钥和 CTF 数据；请自行审查，不会进入脱敏日志。'
+      : '本地原始数据可能含 URL、Cookie、Token、密码和靶机响应。请检查敏感内容后再复制给 AI；此内容不进入「复制脱敏日志」。';
     const pre=document.createElement('pre');
     pre.className='diag-raw';
     panel.append(warning,pre);
@@ -618,7 +709,7 @@
       if (!panel.hidden) {
         panel.hidden=true;pre.textContent='';
         diagnostic.rawLock=false;
-        button.textContent='按需查看原始详情';
+        button.textContent=row.reference.kind==='model'?'查看模型消息详情':'按需查看原始详情';
         renderDiagnostic(true);
         return;
       }
@@ -626,9 +717,11 @@
       const sessionID=state.session;
       const generation=state.generation;
       button.disabled=true;
-      button.textContent='正在读取本地 ToolPart…';
+      button.textContent=row.reference.kind==='model'?'正在读取本地模型消息…':'正在读取本地 ToolPart…';
       try {
-        const detail=await loadStoredTool(row.reference,sessionID);
+        const detail=row.reference.kind==='model'
+          ? await loadStoredModel(row.reference,sessionID)
+          : await loadStoredTool(row.reference,sessionID);
         if (sessionID!==state.session || generation!==state.generation || !card.isConnected) return;
         const json=JSON.stringify(detail,null,2);
         pre.textContent=json.length>150000 ? json.slice(0,150000)+
